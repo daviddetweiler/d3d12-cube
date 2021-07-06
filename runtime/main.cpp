@@ -13,6 +13,8 @@
 #include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
 
+#include "wavefront_object_loader.h"
+
 namespace helium {
 	constexpr auto is_d3d12_debugging_enabled = true;
 	constexpr auto ready_message = WM_USER;
@@ -185,6 +187,8 @@ namespace helium {
 			0,
 			D3D12_COMMAND_LIST_TYPE_DIRECT,
 			D3D12_COMMAND_LIST_FLAG_NONE);
+
+		const auto object = load_wavefront_object("bunny.obj");
 
 		winrt::check_bool(PostMessage(window, ready_message, 0, 0));
 		while (!is_exit_required) {
