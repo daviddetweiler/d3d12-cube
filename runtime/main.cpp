@@ -1,6 +1,10 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <initializer_list>
+#include <tuple>
 #include <utility>
 
 #include <gsl/gsl>
@@ -19,6 +23,7 @@ namespace helium {
 	constexpr auto is_d3d12_debugging_enabled = true;
 	constexpr auto ready_message = WM_USER;
 
+	GSL_SUPPRESS(type .1)
 	LRESULT handle_message(HWND window, UINT message, WPARAM w, LPARAM l) noexcept
 	{
 		std::atomic_bool* is_size_updated
@@ -146,20 +151,182 @@ namespace helium {
 		return winrt::capture<ID3D12DescriptorHeap>(&device, &ID3D12Device::CreateDescriptorHeap, &description);
 	}
 
-	void create_rtvs(IDXGISwapChain& swap_chain, ID3D12DescriptorHeap& heap, ID3D12Device& device)
+	template <typename handle_type>
+	constexpr auto offset(handle_type handle, unsigned int descriptor_size, std::uint64_t offset) noexcept
+	{
+		return handle_type {handle.ptr + descriptor_size * offset};
+	}
+
+	void create_rtvs(
+		IDXGISwapChain& swap_chain, D3D12_CPU_DESCRIPTOR_HANDLE rtv_base, unsigned int rtv_size, ID3D12Device& device)
 	{
 		D3D12_RENDER_TARGET_VIEW_DESC description {};
 		description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
 		description.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-		const auto size = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-		auto handle = heap.GetCPUDescriptorHandleForHeapStart();
 		for (gsl::index i {}; i < 2; ++i) {
 			const auto buffer
 				= winrt::capture<ID3D12Resource>(&swap_chain, &IDXGISwapChain::GetBuffer, gsl::narrow<UINT>(i));
 
-			device.CreateRenderTargetView(buffer.get(), &description, handle);
-			handle.ptr += size;
+			device.CreateRenderTargetView(buffer.get(), &description, offset(rtv_base, rtv_size, i));
 		}
+	}
+
+	template <typename type>
+	gsl::span<type> map(ID3D12Resource& resource, unsigned int subresource, std::size_t count)
+	{
+		D3D12_RANGE range {};
+		void* data {};
+		winrt::check_hresult(resource.Map(subresource, &range, &data));
+		return {static_cast<type*>(data), count * sizeof(type)};
+	}
+
+	template <typename... list_types>
+	void execute(ID3D12CommandQueue& queue, list_types&... lists)
+	{
+		const std::initializer_list<ID3D12CommandList* const> list_list {(&lists, ...)};
+		queue.ExecuteCommandLists(gsl::narrow<UINT>(list_list.size()), list_list.begin());
+	}
+
+	struct vertex_buffer {
+		winrt::com_ptr<ID3D12Resource> resource;
+		D3D12_VERTEX_BUFFER_VIEW view;
+	};
+
+	struct index_buffer {
+		winrt::com_ptr<ID3D12Resource> resource;
+		D3D12_INDEX_BUFFER_VIEW view;
+	};
+
+	struct object_buffers {
+		vertex_buffer vertices;
+		index_buffer indices;
+	};
+
+	// This function does *a lot*. It loads the wavefront, creates appropriately sized vertex and index buffers, creates
+	// an upload buffer big enough for both, writes the upload commands, executes them, then returns the buffers with
+	// set-up views
+	object_buffers schedule_object_upload(
+		ID3D12Device& device,
+		ID3D12GraphicsCommandList& list,
+		ID3D12CommandQueue& queue,
+		gpu_fence& fence,
+		ID3D12CommandAllocator& allocator)
+	{
+		D3D12_HEAP_PROPERTIES heap_properties {};
+		heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+		D3D12_HEAP_PROPERTIES upload_heap_properties {};
+		upload_heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+		const auto cube = load_wavefront_object("cube.obj");
+
+		D3D12_RESOURCE_DESC vertex_buffer_description {};
+		vertex_buffer_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		vertex_buffer_description.Width = cube.positions.size() * sizeof(decltype(cube.positions)::value_type);
+		vertex_buffer_description.Height = 1;
+		vertex_buffer_description.DepthOrArraySize = 1;
+		vertex_buffer_description.Format = DXGI_FORMAT_UNKNOWN;
+		vertex_buffer_description.SampleDesc.Count = 1;
+		vertex_buffer_description.MipLevels = 1;
+		vertex_buffer_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+		const auto vertex_buffer = winrt::capture<ID3D12Resource>(
+			&device,
+			&ID3D12Device::CreateCommittedResource,
+			&heap_properties,
+			D3D12_HEAP_FLAG_NONE,
+			&vertex_buffer_description,
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			nullptr);
+
+		const auto index_count = cube.faces.size() * 3;
+		std::vector<unsigned int> indices(index_count);
+		auto index_iterator = indices.begin();
+		for (const auto& face : cube.faces) {
+			for (const auto& vertex : face.vertices)
+				*(index_iterator++) = vertex.position;
+		}
+
+		D3D12_RESOURCE_DESC index_buffer_description {};
+		index_buffer_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		index_buffer_description.Width = index_count * sizeof(decltype(indices)::value_type);
+		index_buffer_description.Height = 1;
+		index_buffer_description.DepthOrArraySize = 1;
+		index_buffer_description.Format = DXGI_FORMAT_UNKNOWN;
+		index_buffer_description.SampleDesc.Count = 1;
+		index_buffer_description.MipLevels = 1;
+		index_buffer_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+		const auto index_buffer = winrt::capture<ID3D12Resource>(
+			&device,
+			&ID3D12Device::CreateCommittedResource,
+			&heap_properties,
+			D3D12_HEAP_FLAG_NONE,
+			&index_buffer_description,
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			nullptr);
+
+		D3D12_RESOURCE_DESC upload_buffer_description {};
+		upload_buffer_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		upload_buffer_description.Width = vertex_buffer_description.Width + index_buffer_description.Width;
+		upload_buffer_description.Height = 1;
+		upload_buffer_description.DepthOrArraySize = 1;
+		upload_buffer_description.Format = DXGI_FORMAT_UNKNOWN;
+		upload_buffer_description.SampleDesc.Count = 1;
+		upload_buffer_description.MipLevels = 1;
+		upload_buffer_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+		const auto upload_buffer = winrt::capture<ID3D12Resource>(
+			&device,
+			&ID3D12Device::CreateCommittedResource,
+			&upload_heap_properties,
+			D3D12_HEAP_FLAG_NONE,
+			&upload_buffer_description,
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr);
+
+		const auto upload_span = map<std::byte>(*upload_buffer, 0, upload_buffer_description.Width);
+		const auto upload_iterator = upload_span.begin();
+		const auto vertex_bytes = gsl::as_bytes(gsl::span {cube.positions});
+		const auto index_bytes = gsl::as_bytes(gsl::span {indices});
+		std::copy(vertex_bytes.begin(), vertex_bytes.end(), upload_iterator);
+		std::copy(index_bytes.begin(), index_bytes.end(), std::next(upload_iterator, vertex_buffer_description.Width));
+		upload_buffer->Unmap(0, nullptr);
+
+		winrt::check_hresult(list.Reset(&allocator, nullptr));
+
+		list.CopyBufferRegion(vertex_buffer.get(), 0, upload_buffer.get(), 0, vertex_buffer_description.Width);
+		list.CopyBufferRegion(
+			index_buffer.get(),
+			0,
+			upload_buffer.get(),
+			vertex_buffer_description.Width,
+			index_buffer_description.Width);
+
+		const std::initializer_list barriers {
+			transition(*vertex_buffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER),
+			transition(*index_buffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER)};
+
+		list.ResourceBarrier(gsl::narrow<UINT>(barriers.size()), barriers.begin());
+
+		winrt::check_hresult(list.Close());
+		execute(queue, list);
+		fence.bump(queue);
+
+		D3D12_VERTEX_BUFFER_VIEW vertices_view {};
+		vertices_view.BufferLocation = vertex_buffer->GetGPUVirtualAddress();
+		vertices_view.SizeInBytes = gsl::narrow<UINT>(vertex_buffer_description.Width);
+		vertices_view.StrideInBytes = sizeof(decltype(cube.positions)::value_type);
+
+		D3D12_INDEX_BUFFER_VIEW indices_view {};
+		indices_view.BufferLocation = index_buffer->GetGPUVirtualAddress();
+		indices_view.Format = DXGI_FORMAT_R32_UINT;
+		indices_view.SizeInBytes = gsl::narrow<UINT>(index_buffer_description.Width);
+
+		// Can't release the upload buffer while the command list is still in-flight
+		fence.block();
+
+		return {{vertex_buffer, vertices_view}, {index_buffer, indices_view}};
 	}
 
 	void execute_game_thread(const std::atomic_bool& is_exit_required, std::atomic_bool& is_size_updated, HWND window)
@@ -175,8 +342,10 @@ namespace helium {
 		gpu_fence fence {*device};
 
 		const auto rtv_heap = create_rtv_heap(*device);
+		const auto rtv_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+		const auto rtv_base = rtv_heap->GetCPUDescriptorHandleForHeapStart();
 		const auto swap_chain = attach_swap_chain(window, *direct_queue, *factory);
-		create_rtvs(*swap_chain, *rtv_heap, *device);
+		create_rtvs(*swap_chain, rtv_base, rtv_size, *device);
 
 		const auto command_allocator = winrt::capture<ID3D12CommandAllocator>(
 			device, &ID3D12Device::CreateCommandAllocator, D3D12_COMMAND_LIST_TYPE_DIRECT);
@@ -188,7 +357,7 @@ namespace helium {
 			D3D12_COMMAND_LIST_TYPE_DIRECT,
 			D3D12_COMMAND_LIST_FLAG_NONE);
 
-		const auto object = load_wavefront_object("bunny.obj");
+		const auto object = schedule_object_upload(*device, *command_list, *direct_queue, fence, *command_allocator);
 
 		winrt::check_bool(PostMessage(window, ready_message, 0, 0));
 		while (!is_exit_required) {
@@ -199,25 +368,20 @@ namespace helium {
 				is_size_updated = false;
 
 				winrt::check_hresult(swap_chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0));
-				create_rtvs(*swap_chain, *rtv_heap, *device);
+				create_rtvs(*swap_chain, rtv_base, rtv_size, *device);
 			}
 
 			winrt::check_hresult(command_allocator->Reset());
 			winrt::check_hresult(command_list->Reset(command_allocator.get(), nullptr));
-			const std::uint64_t size {device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV)};
 			const auto index = swap_chain->GetCurrentBackBufferIndex();
-			const D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle {
-				rtv_heap->GetCPUDescriptorHandleForHeapStart().ptr + index * size};
-
 			record_commands(
 				*command_list,
-				rtv_handle,
+				offset(rtv_base, rtv_size, index),
 				*winrt::capture<ID3D12Resource>(swap_chain, &IDXGISwapChain::GetBuffer, index));
 
 			winrt::check_hresult(command_list->Close());
 
-			ID3D12CommandList* const list_pointer {command_list.get()};
-			direct_queue->ExecuteCommandLists(1, &list_pointer);
+			execute(*direct_queue, *command_list);
 
 			winrt::check_hresult(swap_chain->Present(1, 0));
 			fence.bump(*direct_queue);
