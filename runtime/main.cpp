@@ -1,6 +1,8 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <utility>
 
 #include <gsl/gsl>
@@ -105,9 +107,38 @@ namespace helium {
 		std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
 	}
 
-	void
-	record_commands(ID3D12GraphicsCommandList& command_list, D3D12_CPU_DESCRIPTOR_HANDLE rtv, ID3D12Resource& buffer)
+	struct gpu_pipeline {
+		winrt::com_ptr<ID3D12RootSignature> root_signature;
+		winrt::com_ptr<ID3D12PipelineState> pipeline_state;
+	};
+
+	void record_commands(
+		ID3D12GraphicsCommandList& command_list,
+		D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+		ID3D12Resource& buffer,
+		const gpu_pipeline& pipeline,
+		ID3D12CommandAllocator& allocator)
 	{
+		winrt::check_hresult(command_list.Reset(&allocator, pipeline.pipeline_state.get()));
+
+		command_list.SetGraphicsRootSignature(pipeline.root_signature.get());
+		command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		command_list.OMSetRenderTargets(1, &rtv, false, nullptr);
+
+		const auto description = buffer.GetDesc(); // TODO: we should really be caching this stuff all in one spot
+
+		D3D12_RECT scissor {};
+		scissor.right = gsl::narrow<long>(description.Width);
+		scissor.bottom = gsl::narrow<long>(description.Height);
+
+		D3D12_VIEWPORT viewport {};
+		viewport.Width = gsl::narrow<float>(description.Width);
+		viewport.Height = gsl::narrow<float>(description.Height);
+		viewport.MaxDepth = 1.0f;
+
+		command_list.RSSetScissorRects(1, &scissor);
+		command_list.RSSetViewports(1, &viewport);
+
 		std::array<D3D12_RESOURCE_BARRIER, 1> barriers {
 			transition(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
 
@@ -115,9 +146,12 @@ namespace helium {
 
 		std::array<float, 4> clear_color {0.0f, 0.0f, 0.0f, 1.0f};
 		command_list.ClearRenderTargetView(rtv, clear_color.data(), 0, nullptr);
+		command_list.DrawInstanced(3, 1, 0, 0);
 
 		reverse(barriers.at(0));
 		command_list.ResourceBarrier(gsl::narrow<UINT>(barriers.size()), barriers.data());
+
+		winrt::check_hresult(command_list.Close());
 	}
 
 	auto create_rtv_heap(ID3D12Device& device)
@@ -144,6 +178,56 @@ namespace helium {
 		}
 	}
 
+	auto get_self_path()
+	{
+		std::vector<wchar_t> path_buffer(MAX_PATH + 1);
+		winrt::check_bool(GetModuleFileName(nullptr, path_buffer.data(), MAX_PATH + 1));
+		return std::filesystem::path {path_buffer.data()}.parent_path();
+	}
+
+	auto load_compiled_shader(gsl::cwzstring<> name)
+	{
+		static const auto parent_path {get_self_path()};
+		const auto path = parent_path / name;
+		std::vector<char> buffer(std::filesystem::file_size(path));
+		std::ifstream reader {path, reader.binary};
+		reader.exceptions(reader.badbit | reader.failbit);
+		reader.read(buffer.data(), buffer.size());
+		return buffer;
+	}
+
+	gpu_pipeline create_pipeline_state(ID3D12Device& device)
+	{
+		const auto vertex_shader = load_compiled_shader(L"vertex.cso");
+		const auto pixel_shader = load_compiled_shader(L"pixel.cso");
+		auto root_signature = winrt::capture<ID3D12RootSignature>(
+			&device, &ID3D12Device::CreateRootSignature, 0, vertex_shader.data(), vertex_shader.size());
+
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC description {};
+		description.pRootSignature = root_signature.get();
+		description.VS.BytecodeLength = vertex_shader.size();
+		description.VS.pShaderBytecode = vertex_shader.data();
+		description.PS.BytecodeLength = pixel_shader.size();
+		description.PS.pShaderBytecode = pixel_shader.data();
+		description.SampleMask = D3D12_DEFAULT_SAMPLE_MASK;
+		description.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+		description.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+		description.RasterizerState.DepthClipEnable = true;
+		description.DepthStencilState.DepthEnable = false;
+		description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+		description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+		description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		description.NumRenderTargets = 1;
+		description.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+		description.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+		description.SampleDesc.Count = 1;
+
+		return {
+			std::move(root_signature),
+			winrt::capture<ID3D12PipelineState>(&device, &ID3D12Device::CreateGraphicsPipelineState, &description)};
+	}
+
 	void execute_game_thread(const std::atomic_bool& is_exit_required, HWND window)
 	{
 		if constexpr (is_d3d12_debugging_enabled)
@@ -160,6 +244,7 @@ namespace helium {
 		const auto swap_chain = attach_swap_chain(window, *direct_queue, *factory);
 		create_rtvs(*swap_chain, *rtv_heap, *device);
 
+		const auto pipeline = create_pipeline_state(*device);
 		const auto command_allocator = winrt::capture<ID3D12CommandAllocator>(
 			device, &ID3D12Device::CreateCommandAllocator, D3D12_COMMAND_LIST_TYPE_DIRECT);
 
@@ -175,7 +260,7 @@ namespace helium {
 			fence.block();
 
 			winrt::check_hresult(command_allocator->Reset());
-			winrt::check_hresult(command_list->Reset(command_allocator.get(), nullptr));
+
 			const std::uint64_t size {device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV)};
 			const auto index = swap_chain->GetCurrentBackBufferIndex();
 			const D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle {
@@ -184,9 +269,9 @@ namespace helium {
 			record_commands(
 				*command_list,
 				rtv_handle,
-				*winrt::capture<ID3D12Resource>(swap_chain, &IDXGISwapChain::GetBuffer, index));
-
-			winrt::check_hresult(command_list->Close());
+				*winrt::capture<ID3D12Resource>(swap_chain, &IDXGISwapChain::GetBuffer, index),
+				pipeline,
+				*command_allocator);
 
 			ID3D12CommandList* const list_pointer {command_list.get()};
 			direct_queue->ExecuteCommandLists(1, &list_pointer);
