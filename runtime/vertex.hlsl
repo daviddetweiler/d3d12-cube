@@ -1,6 +1,6 @@
 struct constant_data {
-	float4x4 projection;
-	float4x4 view;
+	row_major float4x4 projection;
+	row_major float4x4 view;
 };
 
 struct vertex_output {
@@ -14,7 +14,7 @@ ConstantBuffer<constant_data> constants : register(b0);
 main(float3 position
 	 : SV_POSITION) {
 	vertex_output output;
-	output.position = mul(constants.projection, mul(constants.view, float4(position, 1.0f)));
+	output.position = mul(mul(float4(position, 1.0f), constants.view), constants.projection);
 	output.color = position;
 	return output;
 }
