@@ -136,11 +136,11 @@ namespace helium {
 		DirectX::XMMATRIX view;
 	};
 
-	auto create_descriptor_heap(ID3D12Device& device, D3D12_DESCRIPTOR_HEAP_TYPE type, unsigned int size)
+	auto create_rtv_heap(ID3D12Device& device)
 	{
 		D3D12_DESCRIPTOR_HEAP_DESC description {};
-		description.NumDescriptors = size;
-		description.Type = type;
+		description.NumDescriptors = 2;
+		description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
 		return winrt::capture<ID3D12DescriptorHeap>(&device, &ID3D12Device::CreateDescriptorHeap, &description);
 	}
 
@@ -355,14 +355,9 @@ namespace helium {
 		pipeline_description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
 		pipeline_description.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
 		pipeline_description.RasterizerState.FrontCounterClockwise = true;
-		pipeline_description.RasterizerState.DepthClipEnable = true;
-		pipeline_description.DepthStencilState.DepthEnable = true;
-		pipeline_description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-		pipeline_description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
 		pipeline_description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 		pipeline_description.NumRenderTargets = 1;
 		pipeline_description.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-		pipeline_description.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 		pipeline_description.SampleDesc.Count = 1;
 		pipeline_description.InputLayout.NumElements = 1;
 		pipeline_description.InputLayout.pInputElementDescs = &position;
@@ -391,7 +386,6 @@ namespace helium {
 		ID3D12GraphicsCommandList& command_list,
 		D3D12_CPU_DESCRIPTOR_HANDLE rtv,
 		ID3D12Resource& buffer,
-		D3D12_CPU_DESCRIPTOR_HANDLE dsv,
 		unsigned int width,
 		unsigned int height,
 		ID3D12RootSignature& root_signature,
@@ -406,7 +400,7 @@ namespace helium {
 		command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		maximize_rasterizer(command_list, width, height);
 
-		command_list.OMSetRenderTargets(1, &rtv, false, &dsv);
+		command_list.OMSetRenderTargets(1, &rtv, false, nullptr);
 
 		std::array barriers {transition(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
 
@@ -451,7 +445,7 @@ namespace helium {
 		const auto direct_queue = create_direct_queue(*device);
 		gpu_fence fence {*device};
 
-		const auto rtv_heap = create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2);
+		const auto rtv_heap = create_rtv_heap(*device);
 		const auto rtv_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 		const auto rtv_base = rtv_heap->GetCPUDescriptorHandleForHeapStart();
 		const auto swap_chain = attach_swap_chain(window, *direct_queue, *factory);
@@ -473,38 +467,6 @@ namespace helium {
 		constants.view = DirectX::XMMatrixIdentity();
 		auto [width, height] = process_resize(*swap_chain, rtv_base, rtv_size, *device, constants);
 
-		D3D12_RESOURCE_DESC depth_buffer_description {};
-		depth_buffer_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-		depth_buffer_description.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-		depth_buffer_description.Format = DXGI_FORMAT_D32_FLOAT;
-		depth_buffer_description.Width = width;
-		depth_buffer_description.Height = height;
-		depth_buffer_description.DepthOrArraySize = 1;
-		depth_buffer_description.SampleDesc.Count = 1;
-
-		D3D12_HEAP_PROPERTIES heap {};
-		heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-		D3D12_CLEAR_VALUE depth_clear {};
-		depth_clear.DepthStencil.Depth = 1.0f;
-		depth_clear.Format = depth_buffer_description.Format;
-		auto depth_buffer = winrt::capture<ID3D12Resource>(
-			device,
-			&ID3D12Device::CreateCommittedResource,
-			&heap,
-			D3D12_HEAP_FLAG_NONE,
-			&depth_buffer_description,
-			D3D12_RESOURCE_STATE_COMMON,
-			&depth_clear);
-
-		const auto dsv_heap = create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1);
-		const auto dsv_base = dsv_heap->GetCPUDescriptorHandleForHeapStart();
-		const auto dsv_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-
-		D3D12_DEPTH_STENCIL_VIEW_DESC dsv_description {};
-		dsv_description.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-		dsv_description.Format = depth_buffer_description.Format;
-		device->CreateDepthStencilView(depth_buffer.get(), &dsv_description, dsv_base);
-
 		using clock = std::chrono::system_clock;
 		const auto start = clock::now();
 
@@ -516,23 +478,11 @@ namespace helium {
 				is_size_updated = false;
 				winrt::check_hresult(swap_chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0));
 				std::tie(width, height) = process_resize(*swap_chain, rtv_base, rtv_size, *device, constants);
-				depth_buffer_description.Width = width;
-				depth_buffer_description.Height = height;
-				depth_buffer = winrt::capture<ID3D12Resource>(
-					device,
-					&ID3D12Device::CreateCommittedResource,
-					&heap,
-					D3D12_HEAP_FLAG_NONE,
-					&depth_buffer_description,
-					D3D12_RESOURCE_STATE_COMMON,
-					&depth_clear);
-
-				device->CreateDepthStencilView(depth_buffer.get(), &dsv_description, dsv_base);
 			}
 
 			const auto time = std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - start).count();
 			constants.view = DirectX::XMMatrixRotationX(0.001f * time) * DirectX::XMMatrixRotationZ(0.0001f * time)
-				* DirectX::XMMatrixTranslation(0.0f, 1.0f, -3.0f);
+				* DirectX::XMMatrixTranslation(0.0f, 0.0f, -3.0f);
 
 			winrt::check_hresult(command_allocator->Reset());
 			winrt::check_hresult(command_list->Reset(command_allocator.get(), pipeline.pipeline_state.get()));
@@ -541,7 +491,6 @@ namespace helium {
 				*command_list,
 				offset(rtv_base, rtv_size, index),
 				*winrt::capture<ID3D12Resource>(swap_chain, &IDXGISwapChain::GetBuffer, index),
-				dsv_base,
 				width,
 				height,
 				*pipeline.root_signature,
