@@ -112,72 +112,12 @@ namespace helium {
 		winrt::com_ptr<ID3D12PipelineState> pipeline_state;
 	};
 
-	void record_commands(
-		ID3D12GraphicsCommandList& command_list,
-		D3D12_CPU_DESCRIPTOR_HANDLE rtv,
-		D3D12_CPU_DESCRIPTOR_HANDLE dsv,
-		ID3D12Resource& buffer,
-		const gpu_pipeline& pipeline,
-		ID3D12CommandAllocator& allocator)
-	{
-		winrt::check_hresult(command_list.Reset(&allocator, pipeline.pipeline_state.get()));
-
-		command_list.SetGraphicsRootSignature(pipeline.root_signature.get());
-		command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		command_list.OMSetRenderTargets(1, &rtv, false, &dsv);
-
-		const auto description = buffer.GetDesc(); // TODO: we should really be caching this stuff all in one spot
-
-		D3D12_RECT scissor {};
-		scissor.right = gsl::narrow<long>(description.Width);
-		scissor.bottom = gsl::narrow<long>(description.Height);
-
-		D3D12_VIEWPORT viewport {};
-		viewport.Width = gsl::narrow<float>(description.Width);
-		viewport.Height = gsl::narrow<float>(description.Height);
-		viewport.MaxDepth = 1.0f;
-
-		command_list.RSSetScissorRects(1, &scissor);
-		command_list.RSSetViewports(1, &viewport);
-
-		std::array<D3D12_RESOURCE_BARRIER, 1> barriers {
-			transition(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
-
-		command_list.ResourceBarrier(gsl::narrow<UINT>(barriers.size()), barriers.data());
-
-		std::array<float, 4> clear_color {0.0f, 0.0f, 0.0f, 1.0f};
-		command_list.ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-		command_list.ClearRenderTargetView(rtv, clear_color.data(), 0, nullptr);
-		command_list.DrawInstanced(3, 1, 0, 0);
-
-		reverse(barriers.at(0));
-		command_list.ResourceBarrier(gsl::narrow<UINT>(barriers.size()), barriers.data());
-
-		winrt::check_hresult(command_list.Close());
-	}
-
 	auto create_descriptor_heap(ID3D12Device& device, D3D12_DESCRIPTOR_HEAP_TYPE type, unsigned int size)
 	{
 		D3D12_DESCRIPTOR_HEAP_DESC description {};
 		description.NumDescriptors = size;
 		description.Type = type;
 		return winrt::capture<ID3D12DescriptorHeap>(&device, &ID3D12Device::CreateDescriptorHeap, &description);
-	}
-
-	void create_rtvs(IDXGISwapChain& swap_chain, ID3D12DescriptorHeap& heap, ID3D12Device& device)
-	{
-		D3D12_RENDER_TARGET_VIEW_DESC description {};
-		description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-		description.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-		const auto size = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-		auto handle = heap.GetCPUDescriptorHandleForHeapStart();
-		for (gsl::index i {}; i < 2; ++i) {
-			const auto buffer
-				= winrt::capture<ID3D12Resource>(&swap_chain, &IDXGISwapChain::GetBuffer, gsl::narrow<UINT>(i));
-
-			device.CreateRenderTargetView(buffer.get(), &description, handle);
-			handle.ptr += size;
-		}
 	}
 
 	auto get_self_path()
@@ -311,9 +251,94 @@ namespace helium {
 		}
 	};
 
-	D3D12_CPU_DESCRIPTOR_HANDLE offset(D3D12_CPU_DESCRIPTOR_HANDLE handle, std::size_t size, std::size_t index) noexcept
+	constexpr D3D12_CPU_DESCRIPTOR_HANDLE
+	offset(D3D12_CPU_DESCRIPTOR_HANDLE handle, std::size_t size, std::size_t index)
 	{
 		return {handle.ptr + index * size};
+	}
+
+	auto
+	get_backbuffers(const device_resources& device, IDXGISwapChain& swap_chain, D3D12_CPU_DESCRIPTOR_HANDLE rtv_base)
+	{
+		const std::array buffers {
+			winrt::capture<ID3D12Resource>(&swap_chain, &IDXGISwapChain::GetBuffer, 0),
+			winrt::capture<ID3D12Resource>(&swap_chain, &IDXGISwapChain::GetBuffer, 1)};
+
+		for (gsl::index i {}; i < 2; ++i) {
+			D3D12_RENDER_TARGET_VIEW_DESC description {};
+			description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+			description.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+			device.device->CreateRenderTargetView(
+				buffers.at(i).get(), &description, offset(rtv_base, device.size_table.rtv_size, i));
+		}
+
+		return buffers;
+	}
+
+	// Lots of reorganization opportunities here, around formats, order of initalization, and storing texture size / not
+	// fetching them
+	// Mismatch between declaration order and how the data is actually initialized (initialization layout vs. packed
+	// layout) constness enforces constructor initializers
+	// Also, how to handle resizes?
+	struct window_resources {
+		const winrt::com_ptr<IDXGISwapChain3> swap_chain {};
+		const D3D12_CPU_DESCRIPTOR_HANDLE rtv_base {};
+		const std::array<winrt::com_ptr<ID3D12Resource>, 2> backbuffers {};
+		const D3D12_CPU_DESCRIPTOR_HANDLE dsv {};
+		const winrt::com_ptr<ID3D12Resource> depth_buffer {};
+
+		window_resources(const device_resources& device, HWND window, IDXGIFactory3& factory) :
+			swap_chain {attach_swap_chain(window, *device.queue, factory)},
+			rtv_base {device.rtv_heap->GetCPUDescriptorHandleForHeapStart()},
+			backbuffers {get_backbuffers(device, *swap_chain, rtv_base)},
+			dsv {device.dsv_heap->GetCPUDescriptorHandleForHeapStart()},
+			depth_buffer {create_depth_buffer(*device.device, dsv, *swap_chain)}
+		{
+		}
+	};
+
+	void
+	record_commands(const device_resources& device, const gpu_pipeline& pipeline, const window_resources& window_stuff)
+	{
+		auto& command_list = *device.commands;
+		const auto index = window_stuff.swap_chain->GetCurrentBackBufferIndex();
+		auto& buffer = *window_stuff.backbuffers.at(index);
+		const auto rtv = offset(window_stuff.rtv_base, device.size_table.rtv_size, index);
+
+		winrt::check_hresult(command_list.Reset(device.allocator.get(), pipeline.pipeline_state.get()));
+
+		command_list.SetGraphicsRootSignature(pipeline.root_signature.get());
+		command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		command_list.OMSetRenderTargets(1, &rtv, false, &window_stuff.dsv);
+
+		const auto description = buffer.GetDesc(); // TODO: we should really be caching this stuff all in one spot
+
+		D3D12_RECT scissor {};
+		scissor.right = gsl::narrow<long>(description.Width);
+		scissor.bottom = gsl::narrow<long>(description.Height);
+
+		D3D12_VIEWPORT viewport {};
+		viewport.Width = gsl::narrow<float>(description.Width);
+		viewport.Height = gsl::narrow<float>(description.Height);
+		viewport.MaxDepth = 1.0f;
+
+		command_list.RSSetScissorRects(1, &scissor);
+		command_list.RSSetViewports(1, &viewport);
+
+		std::array<D3D12_RESOURCE_BARRIER, 1> barriers {
+			transition(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
+
+		command_list.ResourceBarrier(gsl::narrow<UINT>(barriers.size()), barriers.data());
+
+		std::array<float, 4> clear_color {0.0f, 0.0f, 0.0f, 1.0f};
+		command_list.ClearDepthStencilView(window_stuff.dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+		command_list.ClearRenderTargetView(rtv, clear_color.data(), 0, nullptr);
+		command_list.DrawInstanced(3, 1, 0, 0);
+
+		reverse(barriers.at(0));
+		command_list.ResourceBarrier(gsl::narrow<UINT>(barriers.size()), barriers.data());
+
+		winrt::check_hresult(command_list.Close());
 	}
 
 	void execute_game_thread(const std::atomic_bool& is_exit_required, HWND window)
@@ -325,11 +350,7 @@ namespace helium {
 			CreateDXGIFactory2, is_d3d12_debugging_enabled ? DXGI_CREATE_FACTORY_DEBUG : 0);
 
 		device_resources device {get_high_performance_device(*factory)};
-		const auto rtv_base = device.rtv_heap->GetCPUDescriptorHandleForHeapStart();
-		const auto dsv_base = device.dsv_heap->GetCPUDescriptorHandleForHeapStart();
-		const auto swap_chain = attach_swap_chain(window, *device.queue, *factory);
-		create_rtvs(*swap_chain, *device.rtv_heap, *device.device);
-		const auto depth_buffer = create_depth_buffer(*device.device, dsv_base, *swap_chain);
+		window_resources window_stuff {device, window, *factory};
 		const auto pipeline = create_pipeline_state(*device.device);
 
 		winrt::check_bool(PostMessage(window, ready_message, 0, 0));
@@ -338,20 +359,12 @@ namespace helium {
 
 			winrt::check_hresult(device.allocator->Reset());
 
-			const auto index = swap_chain->GetCurrentBackBufferIndex();
-			const auto rtv_handle = offset(rtv_base, device.size_table.rtv_size, index);
-			record_commands(
-				*device.commands,
-				rtv_handle,
-				dsv_base,
-				*winrt::capture<ID3D12Resource>(swap_chain, &IDXGISwapChain::GetBuffer, index),
-				pipeline,
-				*device.allocator);
+			record_commands(device, pipeline, window_stuff);
 
 			ID3D12CommandList* const list_pointer {device.commands.get()};
 			device.queue->ExecuteCommandLists(1, &list_pointer);
 
-			winrt::check_hresult(swap_chain->Present(1, 0));
+			winrt::check_hresult(window_stuff.swap_chain->Present(1, 0));
 			device.fence.bump(*device.queue);
 		}
 
