@@ -19,26 +19,10 @@ namespace helium {
 
 	LRESULT handle_message(HWND window, UINT message, WPARAM w, LPARAM l) noexcept
 	{
-		std::atomic_bool* is_size_updated
-			= reinterpret_cast<std::atomic_bool*>(GetWindowLongPtr(window, GWLP_USERDATA));
-
 		switch (message) {
 		case ready_message:
 			ShowWindow(window, SW_SHOW);
 			return 0;
-
-		case WM_SIZE:
-			if (is_size_updated)
-				*is_size_updated = true;
-
-			return 0;
-
-		case WM_CREATE: {
-			SetWindowLongPtr(
-				window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(reinterpret_cast<LPCREATESTRUCT>(l)->lpCreateParams));
-
-			return 0;
-		}
 
 		case WM_CLOSE:
 			ShowWindow(window, SW_HIDE);
@@ -160,7 +144,7 @@ namespace helium {
 		}
 	}
 
-	void execute_game_thread(const std::atomic_bool& is_exit_required, std::atomic_bool& is_size_updated, HWND window)
+	void execute_game_thread(const std::atomic_bool& is_exit_required, HWND window)
 	{
 		if constexpr (is_d3d12_debugging_enabled)
 			winrt::capture<ID3D12Debug>(D3D12GetDebugInterface)->EnableDebugLayer();
@@ -189,14 +173,6 @@ namespace helium {
 		winrt::check_bool(PostMessage(window, ready_message, 0, 0));
 		while (!is_exit_required) {
 			fence.block();
-
-			if (is_size_updated) {
-				OutputDebugString(L"[INFO] Size was updated\n");
-				is_size_updated = false;
-
-				winrt::check_hresult(swap_chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0));
-				create_rtvs(*swap_chain, *rtv_heap, *device);
-			}
 
 			winrt::check_hresult(command_allocator->Reset());
 			winrt::check_hresult(command_list->Reset(command_allocator.get(), nullptr));
@@ -250,9 +226,8 @@ int WinMain(HINSTANCE self, HINSTANCE, char*, int)
 		&is_size_updated));
 
 	std::atomic_bool is_exit_required {};
-	std::thread game_thread {[&is_exit_required, &is_size_updated, window] {
-		execute_game_thread(is_exit_required, is_size_updated, window);
-	}};
+	std::thread game_thread {
+		[&is_exit_required, &is_size_updated, window] { execute_game_thread(is_exit_required, window); }};
 
 	MSG message {};
 	while (GetMessage(&message, nullptr, 0, 0)) {
