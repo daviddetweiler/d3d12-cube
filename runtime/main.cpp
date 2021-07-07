@@ -269,6 +269,53 @@ namespace helium {
 		return buffer;
 	}
 
+	struct descriptor_size_table {
+		unsigned int rtv_size {};
+		unsigned int dsv_size {};
+	};
+
+	auto get_sizes(ID3D12Device& device)
+	{
+		descriptor_size_table table {};
+		table.rtv_size = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+		table.dsv_size = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+		return table;
+	}
+
+	struct device_resources {
+		const winrt::com_ptr<ID3D12Device4> device {};
+		const descriptor_size_table size_table {};
+		const winrt::com_ptr<ID3D12CommandQueue> queue {};
+		const winrt::com_ptr<ID3D12DescriptorHeap> rtv_heap {};
+		const winrt::com_ptr<ID3D12DescriptorHeap> dsv_heap {};
+		const winrt::com_ptr<ID3D12CommandAllocator> allocator {};
+		const winrt::com_ptr<ID3D12GraphicsCommandList> commands {};
+		gpu_fence fence;
+
+		device_resources(winrt::com_ptr<ID3D12Device4> device) :
+			device {device},
+			size_table {get_sizes(*device)},
+			queue {create_direct_queue(*device)},
+			rtv_heap {create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2)},
+			dsv_heap {create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1)},
+			allocator {winrt::capture<ID3D12CommandAllocator>(
+				device, &ID3D12Device::CreateCommandAllocator, D3D12_COMMAND_LIST_TYPE_DIRECT)},
+			commands {winrt::capture<ID3D12GraphicsCommandList>(
+				device,
+				&ID3D12Device4::CreateCommandList1,
+				0,
+				D3D12_COMMAND_LIST_TYPE_DIRECT,
+				D3D12_COMMAND_LIST_FLAG_NONE)},
+			fence {*device}
+		{
+		}
+	};
+
+	D3D12_CPU_DESCRIPTOR_HANDLE offset(D3D12_CPU_DESCRIPTOR_HANDLE handle, std::size_t size, std::size_t index) noexcept
+	{
+		return {handle.ptr + index * size};
+	}
+
 	void execute_game_thread(const std::atomic_bool& is_exit_required, HWND window)
 	{
 		if constexpr (is_d3d12_debugging_enabled)
@@ -277,55 +324,38 @@ namespace helium {
 		const auto factory = winrt::capture<IDXGIFactory6>(
 			CreateDXGIFactory2, is_d3d12_debugging_enabled ? DXGI_CREATE_FACTORY_DEBUG : 0);
 
-		const auto device = get_high_performance_device(*factory);
-		const auto direct_queue = create_direct_queue(*device);
-		gpu_fence fence {*device};
-
-		const auto rtv_heap = create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2);
-		const auto dsv_heap = create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1);
-		const auto dsv_base = dsv_heap->GetCPUDescriptorHandleForHeapStart();
-		const auto swap_chain = attach_swap_chain(window, *direct_queue, *factory);
-		create_rtvs(*swap_chain, *rtv_heap, *device);
-		const auto depth_buffer = create_depth_buffer(*device, dsv_base, *swap_chain);
-
-		const auto pipeline = create_pipeline_state(*device);
-		const auto command_allocator = winrt::capture<ID3D12CommandAllocator>(
-			device, &ID3D12Device::CreateCommandAllocator, D3D12_COMMAND_LIST_TYPE_DIRECT);
-
-		const auto command_list = winrt::capture<ID3D12GraphicsCommandList>(
-			device,
-			&ID3D12Device4::CreateCommandList1,
-			0,
-			D3D12_COMMAND_LIST_TYPE_DIRECT,
-			D3D12_COMMAND_LIST_FLAG_NONE);
+		device_resources device {get_high_performance_device(*factory)};
+		const auto rtv_base = device.rtv_heap->GetCPUDescriptorHandleForHeapStart();
+		const auto dsv_base = device.dsv_heap->GetCPUDescriptorHandleForHeapStart();
+		const auto swap_chain = attach_swap_chain(window, *device.queue, *factory);
+		create_rtvs(*swap_chain, *device.rtv_heap, *device.device);
+		const auto depth_buffer = create_depth_buffer(*device.device, dsv_base, *swap_chain);
+		const auto pipeline = create_pipeline_state(*device.device);
 
 		winrt::check_bool(PostMessage(window, ready_message, 0, 0));
 		while (!is_exit_required) {
-			fence.block();
+			device.fence.block();
 
-			winrt::check_hresult(command_allocator->Reset());
+			winrt::check_hresult(device.allocator->Reset());
 
-			const std::uint64_t size {device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV)};
 			const auto index = swap_chain->GetCurrentBackBufferIndex();
-			const D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle {
-				rtv_heap->GetCPUDescriptorHandleForHeapStart().ptr + index * size};
-
+			const auto rtv_handle = offset(rtv_base, device.size_table.rtv_size, index);
 			record_commands(
-				*command_list,
+				*device.commands,
 				rtv_handle,
 				dsv_base,
 				*winrt::capture<ID3D12Resource>(swap_chain, &IDXGISwapChain::GetBuffer, index),
 				pipeline,
-				*command_allocator);
+				*device.allocator);
 
-			ID3D12CommandList* const list_pointer {command_list.get()};
-			direct_queue->ExecuteCommandLists(1, &list_pointer);
+			ID3D12CommandList* const list_pointer {device.commands.get()};
+			device.queue->ExecuteCommandLists(1, &list_pointer);
 
 			winrt::check_hresult(swap_chain->Present(1, 0));
-			fence.bump(*direct_queue);
+			device.fence.bump(*device.queue);
 		}
 
-		fence.block();
+		device.fence.block();
 	}
 }
 
