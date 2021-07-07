@@ -3,8 +3,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <initializer_list>
-#include <tuple>
+#include <filesystem>
+#include <fstream>
 #include <utility>
 
 #include <gsl/gsl>
@@ -17,10 +17,12 @@
 #include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
 
+#include <DirectXMath.h>
+
 #include "wavefront_object_loader.h"
 
 namespace helium {
-	constexpr auto is_d3d12_debugging_enabled = true;
+	constexpr auto is_d3d12_debugging_enabled = false;
 	constexpr auto ready_message = WM_USER;
 
 	GSL_SUPPRESS(type .1)
@@ -122,26 +124,16 @@ namespace helium {
 		return barrier;
 	}
 
-	auto reverse(D3D12_RESOURCE_BARRIER& barrier) noexcept
+	void reverse(D3D12_RESOURCE_BARRIER& barrier) noexcept
 	{
 		Expects(barrier.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION);
 		std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
 	}
 
-	void
-	record_commands(ID3D12GraphicsCommandList& command_list, D3D12_CPU_DESCRIPTOR_HANDLE rtv, ID3D12Resource& buffer)
-	{
-		std::array<D3D12_RESOURCE_BARRIER, 1> barriers {
-			transition(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
-
-		command_list.ResourceBarrier(gsl::narrow<UINT>(barriers.size()), barriers.data());
-
-		std::array<float, 4> clear_color {0.0f, 0.0f, 0.0f, 1.0f};
-		command_list.ClearRenderTargetView(rtv, clear_color.data(), 0, nullptr);
-
-		reverse(barriers.at(0));
-		command_list.ResourceBarrier(gsl::narrow<UINT>(barriers.size()), barriers.data());
-	}
+	struct root_constants {
+		DirectX::XMMATRIX projection;
+		DirectX::XMMATRIX view;
+	};
 
 	auto create_rtv_heap(ID3D12Device& device)
 	{
@@ -183,8 +175,8 @@ namespace helium {
 	template <typename... list_types>
 	void execute(ID3D12CommandQueue& queue, list_types&... lists)
 	{
-		const std::initializer_list<ID3D12CommandList* const> list_list {(&lists, ...)};
-		queue.ExecuteCommandLists(gsl::narrow<UINT>(list_list.size()), list_list.begin());
+		const std::array<ID3D12CommandList* const, sizeof...(lists)> list_list {(&lists, ...)};
+		queue.ExecuteCommandLists(gsl::narrow<UINT>(list_list.size()), list_list.data());
 	}
 
 	struct vertex_buffer {
@@ -200,7 +192,27 @@ namespace helium {
 	struct object_buffers {
 		vertex_buffer vertices;
 		index_buffer indices;
+		unsigned int index_count;
 	};
+
+	struct vertex_data {
+		std::vector<vector3> vertices {};
+		std::vector<unsigned int> indices {};
+	};
+
+	vertex_data load_wavefront_vertices(gsl::czstring<> name)
+	{
+		auto object = load_wavefront_object(name);
+		const auto index_count = object.faces.size() * 3;
+		std::vector<unsigned int> indices(index_count);
+		auto index_iterator = indices.begin();
+		for (const auto& face : object.faces) {
+			for (const auto& vertex : face.vertices)
+				*(index_iterator++) = vertex.position - 1;
+		}
+
+		return {std::move(object.positions), std::move(indices)};
+	}
 
 	// This function does *a lot*. It loads the wavefront, creates appropriately sized vertex and index buffers, creates
 	// an upload buffer big enough for both, writes the upload commands, executes them, then returns the buffers with
@@ -218,11 +230,11 @@ namespace helium {
 		D3D12_HEAP_PROPERTIES upload_heap_properties {};
 		upload_heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
 
-		const auto cube = load_wavefront_object("cube.obj");
+		const auto cube = load_wavefront_vertices("cube.wv");
 
 		D3D12_RESOURCE_DESC vertex_buffer_description {};
 		vertex_buffer_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-		vertex_buffer_description.Width = cube.positions.size() * sizeof(decltype(cube.positions)::value_type);
+		vertex_buffer_description.Width = cube.vertices.size() * sizeof(decltype(cube.vertices)::value_type);
 		vertex_buffer_description.Height = 1;
 		vertex_buffer_description.DepthOrArraySize = 1;
 		vertex_buffer_description.Format = DXGI_FORMAT_UNKNOWN;
@@ -239,17 +251,9 @@ namespace helium {
 			D3D12_RESOURCE_STATE_COPY_DEST,
 			nullptr);
 
-		const auto index_count = cube.faces.size() * 3;
-		std::vector<unsigned int> indices(index_count);
-		auto index_iterator = indices.begin();
-		for (const auto& face : cube.faces) {
-			for (const auto& vertex : face.vertices)
-				*(index_iterator++) = vertex.position;
-		}
-
 		D3D12_RESOURCE_DESC index_buffer_description {};
 		index_buffer_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-		index_buffer_description.Width = index_count * sizeof(decltype(indices)::value_type);
+		index_buffer_description.Width = cube.indices.size() * sizeof(decltype(cube.indices)::value_type);
 		index_buffer_description.Height = 1;
 		index_buffer_description.DepthOrArraySize = 1;
 		index_buffer_description.Format = DXGI_FORMAT_UNKNOWN;
@@ -287,8 +291,8 @@ namespace helium {
 
 		const auto upload_span = map<std::byte>(*upload_buffer, 0, upload_buffer_description.Width);
 		const auto upload_iterator = upload_span.begin();
-		const auto vertex_bytes = gsl::as_bytes(gsl::span {cube.positions});
-		const auto index_bytes = gsl::as_bytes(gsl::span {indices});
+		const auto vertex_bytes = gsl::as_bytes(gsl::span {cube.vertices});
+		const auto index_bytes = gsl::as_bytes(gsl::span {cube.indices});
 		std::copy(vertex_bytes.begin(), vertex_bytes.end(), upload_iterator);
 		std::copy(index_bytes.begin(), index_bytes.end(), std::next(upload_iterator, vertex_buffer_description.Width));
 		upload_buffer->Unmap(0, nullptr);
@@ -316,7 +320,7 @@ namespace helium {
 		D3D12_VERTEX_BUFFER_VIEW vertices_view {};
 		vertices_view.BufferLocation = vertex_buffer->GetGPUVirtualAddress();
 		vertices_view.SizeInBytes = gsl::narrow<UINT>(vertex_buffer_description.Width);
-		vertices_view.StrideInBytes = sizeof(decltype(cube.positions)::value_type);
+		vertices_view.StrideInBytes = sizeof(decltype(cube.vertices)::value_type);
 
 		D3D12_INDEX_BUFFER_VIEW indices_view {};
 		indices_view.BufferLocation = index_buffer->GetGPUVirtualAddress();
@@ -326,7 +330,135 @@ namespace helium {
 		// Can't release the upload buffer while the command list is still in-flight
 		fence.block();
 
-		return {{vertex_buffer, vertices_view}, {index_buffer, indices_view}};
+		const auto index_count = cube.indices.size();
+
+		return {{vertex_buffer, vertices_view}, {index_buffer, indices_view}, gsl::narrow<unsigned int>(index_count)};
+	}
+
+	auto get_self_path()
+	{
+		std::vector<wchar_t> path_buffer(MAX_PATH + 1);
+		winrt::check_bool(GetModuleFileName(nullptr, path_buffer.data(), MAX_PATH + 1));
+		return std::filesystem::path {path_buffer.data()}.parent_path();
+	}
+
+	auto load_compiled_shader(gsl::cwzstring<> name)
+	{
+		static const auto parent_path {get_self_path()};
+		const auto path = parent_path / name;
+		std::vector<char> buffer(std::filesystem::file_size(path));
+		std::ifstream reader {path, reader.binary};
+		reader.exceptions(reader.badbit | reader.failbit);
+		reader.read(buffer.data(), buffer.size());
+		return buffer;
+	}
+
+	auto extract_root_signature(ID3D12Device& device, gsl::span<const char> bytecode)
+	{
+		return winrt::capture<ID3D12RootSignature>(
+			&device, &ID3D12Device::CreateRootSignature, 0, bytecode.data(), bytecode.size());
+	}
+
+	struct gpu_pipeline {
+		winrt::com_ptr<ID3D12RootSignature> root_signature;
+		winrt::com_ptr<ID3D12PipelineState> pipeline_state;
+	};
+
+	gpu_pipeline create_pipeline(ID3D12Device& device)
+	{
+		const auto vertex_shader = load_compiled_shader(L"vertex.cso");
+		const auto pixel_shader = load_compiled_shader(L"pixel.cso");
+		auto root_signature = extract_root_signature(device, vertex_shader);
+
+		D3D12_INPUT_ELEMENT_DESC position {};
+		position.Format = DXGI_FORMAT_R32G32B32_FLOAT;
+		position.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+		position.SemanticName = "SV_POSITION";
+
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_description {};
+		pipeline_description.pRootSignature = root_signature.get();
+		pipeline_description.VS.BytecodeLength = vertex_shader.size();
+		pipeline_description.VS.pShaderBytecode = vertex_shader.data();
+		pipeline_description.PS.BytecodeLength = pixel_shader.size();
+		pipeline_description.PS.pShaderBytecode = pixel_shader.data();
+		pipeline_description.SampleMask = D3D12_DEFAULT_SAMPLE_MASK;
+		pipeline_description.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		pipeline_description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+		pipeline_description.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+		pipeline_description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pipeline_description.NumRenderTargets = 1;
+		pipeline_description.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+		pipeline_description.SampleDesc.Count = 1;
+		pipeline_description.InputLayout.NumElements = 1;
+		pipeline_description.InputLayout.pInputElementDescs = &position;
+
+		return {
+			std::move(root_signature),
+			winrt::capture<ID3D12PipelineState>(
+				&device, &ID3D12Device::CreateGraphicsPipelineState, &pipeline_description)};
+	}
+
+	void maximize_rasterizer(ID3D12GraphicsCommandList& list, unsigned int width, unsigned int height)
+	{
+		D3D12_RECT scissor {};
+		scissor.right = width;
+		scissor.bottom = height;
+		list.RSSetScissorRects(1, &scissor);
+
+		D3D12_VIEWPORT viewport {};
+		viewport.Width = gsl::narrow<float>(width);
+		viewport.Height = gsl::narrow<float>(height);
+		viewport.MaxDepth = D3D12_DEFAULT_VIEWPORT_MAX_DEPTH;
+		list.RSSetViewports(1, &viewport);
+	}
+
+	void record_commands(
+		ID3D12GraphicsCommandList& command_list,
+		D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+		ID3D12Resource& buffer,
+		unsigned int width,
+		unsigned int height,
+		ID3D12RootSignature& root_signature,
+		const root_constants& constants,
+		const object_buffers& object)
+	{
+		command_list.SetGraphicsRootSignature(&root_signature);
+		command_list.SetGraphicsRoot32BitConstants(0, sizeof(constants) / 4, &constants, 0);
+
+		command_list.IASetIndexBuffer(&object.indices.view);
+		command_list.IASetVertexBuffers(0, 1, &object.vertices.view);
+		command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		maximize_rasterizer(command_list, width, height);
+
+		command_list.OMSetRenderTargets(1, &rtv, false, nullptr);
+
+		std::array barriers {transition(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
+
+		command_list.ResourceBarrier(gsl::narrow<UINT>(barriers.size()), barriers.data());
+
+		std::array clear_color {0.0f, 0.0f, 0.0f, 1.0f};
+		command_list.ClearRenderTargetView(rtv, clear_color.data(), 0, nullptr);
+		command_list.DrawIndexedInstanced(object.index_count, 1, 0, 0, 0);
+
+		reverse(barriers.at(0));
+		command_list.ResourceBarrier(gsl::narrow<UINT>(barriers.size()), barriers.data());
+	}
+
+	auto process_resize(
+		IDXGISwapChain& swap_chain,
+		D3D12_CPU_DESCRIPTOR_HANDLE rtv_base,
+		unsigned int rtv_size,
+		ID3D12Device& device,
+		root_constants& constants)
+	{
+		create_rtvs(swap_chain, rtv_base, rtv_size, device);
+
+		DXGI_SWAP_CHAIN_DESC description {};
+		winrt::check_hresult(swap_chain.GetDesc(&description));
+		const auto aspect = static_cast<float>(description.BufferDesc.Width) / description.BufferDesc.Height;
+		constants.projection = DirectX::XMMatrixPerspectiveFovRH(90.0f * 3.14159265f / 180.0f, aspect, 0.01f, 10.0f);
+
+		return std::make_tuple(description.BufferDesc.Width, description.BufferDesc.Height);
 	}
 
 	void execute_game_thread(const std::atomic_bool& is_exit_required, std::atomic_bool& is_size_updated, HWND window)
@@ -345,7 +477,7 @@ namespace helium {
 		const auto rtv_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 		const auto rtv_base = rtv_heap->GetCPUDescriptorHandleForHeapStart();
 		const auto swap_chain = attach_swap_chain(window, *direct_queue, *factory);
-		create_rtvs(*swap_chain, rtv_base, rtv_size, *device);
+		const auto pipeline = create_pipeline(*device);
 
 		const auto command_allocator = winrt::capture<ID3D12CommandAllocator>(
 			device, &ID3D12Device::CreateCommandAllocator, D3D12_COMMAND_LIST_TYPE_DIRECT);
@@ -359,6 +491,10 @@ namespace helium {
 
 		const auto object = schedule_object_upload(*device, *command_list, *direct_queue, fence, *command_allocator);
 
+		root_constants constants {};
+		constants.view = DirectX::XMMatrixIdentity();
+		auto [width, height] = process_resize(*swap_chain, rtv_base, rtv_size, *device, constants);
+
 		winrt::check_bool(PostMessage(window, ready_message, 0, 0));
 		while (!is_exit_required) {
 			fence.block();
@@ -366,18 +502,22 @@ namespace helium {
 			if (is_size_updated) {
 				OutputDebugString(L"[INFO] Size was updated\n");
 				is_size_updated = false;
-
 				winrt::check_hresult(swap_chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0));
-				create_rtvs(*swap_chain, rtv_base, rtv_size, *device);
+				std::tie(width, height) = process_resize(*swap_chain, rtv_base, rtv_size, *device, constants);
 			}
 
 			winrt::check_hresult(command_allocator->Reset());
-			winrt::check_hresult(command_list->Reset(command_allocator.get(), nullptr));
+			winrt::check_hresult(command_list->Reset(command_allocator.get(), pipeline.pipeline_state.get()));
 			const auto index = swap_chain->GetCurrentBackBufferIndex();
 			record_commands(
 				*command_list,
 				offset(rtv_base, rtv_size, index),
-				*winrt::capture<ID3D12Resource>(swap_chain, &IDXGISwapChain::GetBuffer, index));
+				*winrt::capture<ID3D12Resource>(swap_chain, &IDXGISwapChain::GetBuffer, index),
+				width,
+				height,
+				*pipeline.root_signature,
+				constants,
+				object);
 
 			winrt::check_hresult(command_list->Close());
 
