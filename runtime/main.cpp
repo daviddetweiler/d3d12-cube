@@ -115,6 +115,7 @@ namespace helium {
 	void record_commands(
 		ID3D12GraphicsCommandList& command_list,
 		D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+		D3D12_CPU_DESCRIPTOR_HANDLE dsv,
 		ID3D12Resource& buffer,
 		const gpu_pipeline& pipeline,
 		ID3D12CommandAllocator& allocator)
@@ -123,7 +124,7 @@ namespace helium {
 
 		command_list.SetGraphicsRootSignature(pipeline.root_signature.get());
 		command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		command_list.OMSetRenderTargets(1, &rtv, false, nullptr);
+		command_list.OMSetRenderTargets(1, &rtv, false, &dsv);
 
 		const auto description = buffer.GetDesc(); // TODO: we should really be caching this stuff all in one spot
 
@@ -145,6 +146,7 @@ namespace helium {
 		command_list.ResourceBarrier(gsl::narrow<UINT>(barriers.size()), barriers.data());
 
 		std::array<float, 4> clear_color {0.0f, 0.0f, 0.0f, 1.0f};
+		command_list.ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 		command_list.ClearRenderTargetView(rtv, clear_color.data(), 0, nullptr);
 		command_list.DrawInstanced(3, 1, 0, 0);
 
@@ -154,11 +156,11 @@ namespace helium {
 		winrt::check_hresult(command_list.Close());
 	}
 
-	auto create_rtv_heap(ID3D12Device& device)
+	auto create_descriptor_heap(ID3D12Device& device, D3D12_DESCRIPTOR_HEAP_TYPE type, unsigned int size)
 	{
 		D3D12_DESCRIPTOR_HEAP_DESC description {};
-		description.NumDescriptors = 2;
-		description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+		description.NumDescriptors = size;
+		description.Type = type;
 		return winrt::capture<ID3D12DescriptorHeap>(&device, &ID3D12Device::CreateDescriptorHeap, &description);
 	}
 
@@ -214,8 +216,8 @@ namespace helium {
 		description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
 		description.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
 		description.RasterizerState.DepthClipEnable = true;
-		description.DepthStencilState.DepthEnable = false;
-		description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+		description.DepthStencilState.DepthEnable = true;
+		description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
 		description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
 		description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 		description.NumRenderTargets = 1;
@@ -226,6 +228,45 @@ namespace helium {
 		return {
 			std::move(root_signature),
 			winrt::capture<ID3D12PipelineState>(&device, &ID3D12Device::CreateGraphicsPipelineState, &description)};
+	}
+
+	auto create_depth_buffer(ID3D12Device& device, D3D12_CPU_DESCRIPTOR_HANDLE dsv, IDXGISwapChain& swap_chain)
+	{
+		DXGI_SWAP_CHAIN_DESC swap_chain_info {};
+		winrt::check_hresult(swap_chain.GetDesc(&swap_chain_info));
+
+		D3D12_HEAP_PROPERTIES properties {};
+		properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+		D3D12_RESOURCE_DESC description {};
+		description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		description.DepthOrArraySize = 1;
+		description.Width = swap_chain_info.BufferDesc.Width;
+		description.Height = swap_chain_info.BufferDesc.Height;
+		description.MipLevels = 1;
+		description.SampleDesc.Count = 1;
+		description.Format = DXGI_FORMAT_D32_FLOAT;
+		description.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+		D3D12_CLEAR_VALUE clear_value {};
+		clear_value.DepthStencil.Depth = 1.0f;
+		clear_value.Format = description.Format;
+
+		const auto buffer = winrt::capture<ID3D12Resource>(
+			&device,
+			&ID3D12Device::CreateCommittedResource,
+			&properties,
+			D3D12_HEAP_FLAG_NONE,
+			&description,
+			D3D12_RESOURCE_STATE_DEPTH_WRITE,
+			&clear_value);
+
+		D3D12_DEPTH_STENCIL_VIEW_DESC dsv_description {};
+		dsv_description.Format = description.Format;
+		dsv_description.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+		device.CreateDepthStencilView(buffer.get(), &dsv_description, dsv);
+
+		return buffer;
 	}
 
 	void execute_game_thread(const std::atomic_bool& is_exit_required, HWND window)
@@ -240,9 +281,12 @@ namespace helium {
 		const auto direct_queue = create_direct_queue(*device);
 		gpu_fence fence {*device};
 
-		const auto rtv_heap = create_rtv_heap(*device);
+		const auto rtv_heap = create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2);
+		const auto dsv_heap = create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1);
+		const auto dsv_base = dsv_heap->GetCPUDescriptorHandleForHeapStart();
 		const auto swap_chain = attach_swap_chain(window, *direct_queue, *factory);
 		create_rtvs(*swap_chain, *rtv_heap, *device);
+		const auto depth_buffer = create_depth_buffer(*device, dsv_base, *swap_chain);
 
 		const auto pipeline = create_pipeline_state(*device);
 		const auto command_allocator = winrt::capture<ID3D12CommandAllocator>(
@@ -269,6 +313,7 @@ namespace helium {
 			record_commands(
 				*command_list,
 				rtv_handle,
+				dsv_base,
 				*winrt::capture<ID3D12Resource>(swap_chain, &IDXGISwapChain::GetBuffer, index),
 				pipeline,
 				*command_allocator);
