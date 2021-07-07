@@ -86,26 +86,9 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
-    <ClCompile Include="wavefront_object_loader.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="cube.mtl" />
     <None Include="packages.config" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="wavefront_object_loader.h" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="cube.obj">
-      <FileType>Document</FileType>
-      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</DeploymentContent>
-      <DeploymentContent Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</DeploymentContent>
-    </None>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="bunny.obj">
-      <FileType>Document</FileType>
-    </None>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

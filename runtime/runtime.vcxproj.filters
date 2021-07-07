@@ -18,19 +18,8 @@
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="wavefront_object_loader.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
-    <None Include="cube.obj" />
-    <None Include="cube.mtl" />
-    <None Include="bunny.obj" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="wavefront_object_loader.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
   </ItemGroup>
 </Project>
