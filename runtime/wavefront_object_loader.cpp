@@ -132,5 +132,5 @@ helium::wavefront_object helium::load_wavefront_object(gsl::czstring<> name)
 		}
 	}
 
-	return {vertices, normals, uvws, faces};
+	return {vertices, normals, uvws};
 }
