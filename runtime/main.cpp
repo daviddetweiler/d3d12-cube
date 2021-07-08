@@ -1,6 +1,5 @@
 #include <array>
 #include <atomic>
-#include <cstddef>
 #include <cstdint>
 #include <tuple>
 #include <utility>
@@ -15,6 +14,7 @@
 #include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
 
+#include "d3d12_utilities.h"
 #include "shader_loading.h"
 
 namespace helium {
@@ -37,21 +37,6 @@ namespace helium {
 			default:
 				return DefWindowProc(window, message, w, l);
 			}
-		}
-
-		auto get_high_performance_device(IDXGIFactory6& factory)
-		{
-			const auto adapter = winrt::capture<IDXGIAdapter>(
-				&factory, &IDXGIFactory6::EnumAdapterByGpuPreference, 0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE);
-
-			return winrt::capture<ID3D12Device4>(D3D12CreateDevice, adapter.get(), D3D_FEATURE_LEVEL_12_1);
-		}
-
-		auto create_command_queue(ID3D12Device& device)
-		{
-			D3D12_COMMAND_QUEUE_DESC info {};
-			info.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-			return winrt::capture<ID3D12CommandQueue>(&device, &ID3D12Device::CreateCommandQueue, &info);
 		}
 
 		class gpu_fence {
@@ -84,20 +69,19 @@ namespace helium {
 			winrt::handle m_event {};
 		};
 
-		auto transition(ID3D12Resource& resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) noexcept
+		auto create_device(IDXGIFactory6& factory)
 		{
-			D3D12_RESOURCE_BARRIER barrier {};
-			barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-			barrier.Transition.pResource = &resource;
-			barrier.Transition.StateBefore = before;
-			barrier.Transition.StateAfter = after;
-			return barrier;
+			const auto adapter = winrt::capture<IDXGIAdapter>(
+				&factory, &IDXGIFactory6::EnumAdapterByGpuPreference, 0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE);
+
+			return winrt::capture<ID3D12Device4>(D3D12CreateDevice, adapter.get(), D3D_FEATURE_LEVEL_12_1);
 		}
 
-		auto reverse(D3D12_RESOURCE_BARRIER& barrier) noexcept
+		auto create_command_queue(ID3D12Device& device)
 		{
-			Expects(barrier.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION);
-			std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+			D3D12_COMMAND_QUEUE_DESC info {};
+			info.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+			return winrt::capture<ID3D12CommandQueue>(&device, &ID3D12Device::CreateCommandQueue, &info);
 		}
 
 		auto create_descriptor_heap(ID3D12Device& device, D3D12_DESCRIPTOR_HEAP_TYPE type, unsigned int size)
@@ -108,7 +92,23 @@ namespace helium {
 			return winrt::capture<ID3D12DescriptorHeap>(&device, &ID3D12Device::CreateDescriptorHeap, &info);
 		}
 
-		auto create_pipeline_state(ID3D12Device& device)
+		auto create_command_allocator(ID3D12Device& device)
+		{
+			return winrt::capture<ID3D12CommandAllocator>(
+				&device, &ID3D12Device::CreateCommandAllocator, D3D12_COMMAND_LIST_TYPE_DIRECT);
+		}
+
+		auto create_command_list(ID3D12Device4& device)
+		{
+			return winrt::capture<ID3D12GraphicsCommandList>(
+				&device,
+				&ID3D12Device4::CreateCommandList1,
+				0,
+				D3D12_COMMAND_LIST_TYPE_DIRECT,
+				D3D12_COMMAND_LIST_FLAG_NONE);
+		}
+
+		auto create_default_pipeline_state(ID3D12Device& device)
 		{
 			const auto vertex_shader = load_compiled_shader(L"vertex.cso");
 			const auto pixel_shader = load_compiled_shader(L"pixel.cso");
@@ -178,17 +178,6 @@ namespace helium {
 			device.CreateDepthStencilView(buffer.get(), &dsv_info, dsv);
 
 			return buffer;
-		}
-
-		constexpr D3D12_CPU_DESCRIPTOR_HANDLE
-		offset(D3D12_CPU_DESCRIPTOR_HANDLE handle, std::size_t size, std::size_t index)
-		{
-			return {handle.ptr + index * size};
-		}
-
-		auto get_buffer(IDXGISwapChain& swap_chain, unsigned int index)
-		{
-			return winrt::capture<ID3D12Resource>(&swap_chain, &IDXGISwapChain::GetBuffer, index);
 		}
 
 		auto attach_swap_chain(
@@ -267,29 +256,6 @@ namespace helium {
 			winrt::check_hresult(command_list.Close());
 		}
 
-		auto get_extent(IDXGISwapChain1& swap_chain)
-		{
-			DXGI_SWAP_CHAIN_DESC1 info {};
-			winrt::check_hresult(swap_chain.GetDesc1(&info));
-			return std::make_tuple(info.Width, info.Height);
-		}
-
-		auto create_command_allocator(ID3D12Device& device)
-		{
-			return winrt::capture<ID3D12CommandAllocator>(
-				&device, &ID3D12Device::CreateCommandAllocator, D3D12_COMMAND_LIST_TYPE_DIRECT);
-		}
-
-		auto create_command_list(ID3D12Device4& device)
-		{
-			return winrt::capture<ID3D12GraphicsCommandList>(
-				&device,
-				&ID3D12Device4::CreateCommandList1,
-				0,
-				D3D12_COMMAND_LIST_TYPE_DIRECT,
-				D3D12_COMMAND_LIST_FLAG_NONE);
-		}
-
 		// TODO: Descriptor spans! Maybe...
 
 		void execute_game_thread(const std::atomic_bool& is_exit_required, HWND window)
@@ -300,7 +266,7 @@ namespace helium {
 			const auto factory = winrt::capture<IDXGIFactory6>(
 				CreateDXGIFactory2, is_d3d12_debugging_enabled ? DXGI_CREATE_FACTORY_DEBUG : 0);
 
-			const auto device = get_high_performance_device(*factory);
+			const auto device = create_device(*factory);
 			const auto queue = create_command_queue(*device);
 			gpu_fence fence {*device};
 			const auto rtv_heap = create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2);
@@ -314,7 +280,7 @@ namespace helium {
 			const auto depth_buffer
 				= create_depth_buffer(*device, dsv_heap->GetCPUDescriptorHandleForHeapStart(), width, height);
 
-			const auto [root_signature, pipeline_state] = create_pipeline_state(*device);
+			const auto [root_signature, pipeline_state] = create_default_pipeline_state(*device);
 			const auto allocator = create_command_allocator(*device);
 			const auto list = create_command_list(*device);
 			const auto rtv_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
@@ -355,7 +321,6 @@ int WinMain(HINSTANCE self, HINSTANCE, char*, int)
 	window_class.lpfnWndProc = handle_message;
 	winrt::check_bool(RegisterClass(&window_class));
 
-	std::atomic_bool is_size_updated {};
 	const auto window = winrt::check_pointer(CreateWindowEx(
 		WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP,
 		window_class.lpszClassName,
@@ -368,11 +333,10 @@ int WinMain(HINSTANCE self, HINSTANCE, char*, int)
 		nullptr,
 		nullptr,
 		self,
-		&is_size_updated));
+		nullptr));
 
 	std::atomic_bool is_exit_required {};
-	std::thread game_thread {
-		[&is_exit_required, &is_size_updated, window] { execute_game_thread(is_exit_required, window); }};
+	std::thread game_thread {[&is_exit_required, window] { execute_game_thread(is_exit_required, window); }};
 
 	MSG message {};
 	while (GetMessage(&message, nullptr, 0, 0)) {
