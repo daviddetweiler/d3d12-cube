@@ -1,8 +1,7 @@
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
-#include <filesystem>
-#include <fstream>
 #include <tuple>
 #include <utility>
 
@@ -15,6 +14,8 @@
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
+
+#include "shader_loading.h"
 
 namespace helium {
 	namespace {
@@ -48,9 +49,9 @@ namespace helium {
 
 		auto create_command_queue(ID3D12Device& device)
 		{
-			D3D12_COMMAND_QUEUE_DESC description {};
-			description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-			return winrt::capture<ID3D12CommandQueue>(&device, &ID3D12Device::CreateCommandQueue, &description);
+			D3D12_COMMAND_QUEUE_DESC info {};
+			info.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+			return winrt::capture<ID3D12CommandQueue>(&device, &ID3D12Device::CreateCommandQueue, &info);
 		}
 
 		class gpu_fence {
@@ -99,67 +100,47 @@ namespace helium {
 			std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
 		}
 
-		struct gpu_pipeline {
-			winrt::com_ptr<ID3D12RootSignature> root_signature;
-			winrt::com_ptr<ID3D12PipelineState> pipeline_state;
-		};
-
 		auto create_descriptor_heap(ID3D12Device& device, D3D12_DESCRIPTOR_HEAP_TYPE type, unsigned int size)
 		{
-			D3D12_DESCRIPTOR_HEAP_DESC description {};
-			description.NumDescriptors = size;
-			description.Type = type;
-			return winrt::capture<ID3D12DescriptorHeap>(&device, &ID3D12Device::CreateDescriptorHeap, &description);
+			D3D12_DESCRIPTOR_HEAP_DESC info {};
+			info.NumDescriptors = size;
+			info.Type = type;
+			return winrt::capture<ID3D12DescriptorHeap>(&device, &ID3D12Device::CreateDescriptorHeap, &info);
 		}
 
-		auto get_self_path()
-		{
-			std::vector<wchar_t> path_buffer(MAX_PATH + 1);
-			winrt::check_bool(GetModuleFileName(nullptr, path_buffer.data(), MAX_PATH + 1));
-			return std::filesystem::path {path_buffer.data()}.parent_path();
-		}
-
-		auto load_compiled_shader(gsl::cwzstring<> name)
-		{
-			static const auto parent_path {get_self_path()};
-			const auto path = parent_path / name;
-			std::vector<char> buffer(std::filesystem::file_size(path));
-			std::ifstream reader {path, reader.binary};
-			reader.exceptions(reader.badbit | reader.failbit);
-			reader.read(buffer.data(), buffer.size());
-			return buffer;
-		}
-
-		gpu_pipeline create_pipeline_state(ID3D12Device& device)
+		auto create_pipeline_state(ID3D12Device& device)
 		{
 			const auto vertex_shader = load_compiled_shader(L"vertex.cso");
 			const auto pixel_shader = load_compiled_shader(L"pixel.cso");
+
+			// Used only for validating the pipeline, afaik
+			// Why do we even declare it in HLSL?
 			auto root_signature = winrt::capture<ID3D12RootSignature>(
 				&device, &ID3D12Device::CreateRootSignature, 0, vertex_shader.data(), vertex_shader.size());
 
-			D3D12_GRAPHICS_PIPELINE_STATE_DESC description {};
-			description.pRootSignature = root_signature.get();
-			description.VS.BytecodeLength = vertex_shader.size();
-			description.VS.pShaderBytecode = vertex_shader.data();
-			description.PS.BytecodeLength = pixel_shader.size();
-			description.PS.pShaderBytecode = pixel_shader.data();
-			description.SampleMask = D3D12_DEFAULT_SAMPLE_MASK;
-			description.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-			description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-			description.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-			description.RasterizerState.DepthClipEnable = true;
-			description.DepthStencilState.DepthEnable = true;
-			description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-			description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-			description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-			description.NumRenderTargets = 1;
-			description.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-			description.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-			description.SampleDesc.Count = 1;
+			D3D12_GRAPHICS_PIPELINE_STATE_DESC info {};
+			info.pRootSignature = root_signature.get();
+			info.VS.BytecodeLength = vertex_shader.size();
+			info.VS.pShaderBytecode = vertex_shader.data();
+			info.PS.BytecodeLength = pixel_shader.size();
+			info.PS.pShaderBytecode = pixel_shader.data();
+			info.SampleMask = D3D12_DEFAULT_SAMPLE_MASK;
+			info.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+			info.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+			info.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+			info.RasterizerState.DepthClipEnable = true;
+			info.DepthStencilState.DepthEnable = true;
+			info.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+			info.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+			info.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+			info.NumRenderTargets = 1;
+			info.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+			info.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+			info.SampleDesc.Count = 1;
 
-			return {
+			return std::make_tuple(
 				std::move(root_signature),
-				winrt::capture<ID3D12PipelineState>(&device, &ID3D12Device::CreateGraphicsPipelineState, &description)};
+				winrt::capture<ID3D12PipelineState>(&device, &ID3D12Device::CreateGraphicsPipelineState, &info));
 		}
 
 		auto create_depth_buffer(
@@ -168,33 +149,33 @@ namespace helium {
 			D3D12_HEAP_PROPERTIES properties {};
 			properties.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-			D3D12_RESOURCE_DESC description {};
-			description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-			description.DepthOrArraySize = 1;
-			description.Width = width;
-			description.Height = height;
-			description.MipLevels = 1;
-			description.SampleDesc.Count = 1;
-			description.Format = DXGI_FORMAT_D32_FLOAT;
-			description.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+			D3D12_RESOURCE_DESC info {};
+			info.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+			info.DepthOrArraySize = 1;
+			info.Width = width;
+			info.Height = height;
+			info.MipLevels = 1;
+			info.SampleDesc.Count = 1;
+			info.Format = DXGI_FORMAT_D32_FLOAT;
+			info.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
 			D3D12_CLEAR_VALUE clear_value {};
 			clear_value.DepthStencil.Depth = 1.0f;
-			clear_value.Format = description.Format;
+			clear_value.Format = info.Format;
 
 			const auto buffer = winrt::capture<ID3D12Resource>(
 				&device,
 				&ID3D12Device::CreateCommittedResource,
 				&properties,
 				D3D12_HEAP_FLAG_NONE,
-				&description,
+				&info,
 				D3D12_RESOURCE_STATE_DEPTH_WRITE,
 				&clear_value);
 
-			D3D12_DEPTH_STENCIL_VIEW_DESC dsv_description {};
-			dsv_description.Format = description.Format;
-			dsv_description.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-			device.CreateDepthStencilView(buffer.get(), &dsv_description, dsv);
+			D3D12_DEPTH_STENCIL_VIEW_DESC dsv_info {};
+			dsv_info.Format = info.Format;
+			dsv_info.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+			device.CreateDepthStencilView(buffer.get(), &dsv_info, dsv);
 
 			return buffer;
 		}
@@ -308,6 +289,8 @@ namespace helium {
 				D3D12_COMMAND_LIST_TYPE_DIRECT,
 				D3D12_COMMAND_LIST_FLAG_NONE);
 		}
+
+		// TODO: Descriptor spans! Maybe...
 
 		void execute_game_thread(const std::atomic_bool& is_exit_required, HWND window)
 		{
