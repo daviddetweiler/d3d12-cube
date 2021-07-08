@@ -77,11 +77,6 @@ namespace helium {
 		winrt::handle m_event {};
 	};
 
-	struct swap_chain {
-		winrt::com_ptr<IDXGISwapChain3> chain;
-		std::array<winrt::com_ptr<ID3D12Resource>, 2> buffers;
-	};
-
 	auto transition(ID3D12Resource& resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) noexcept
 	{
 		D3D12_RESOURCE_BARRIER barrier {};
@@ -246,6 +241,13 @@ namespace helium {
 		return {handle.ptr + index * size};
 	}
 
+	struct swap_chain {
+		winrt::com_ptr<IDXGISwapChain3> chain;
+		std::array<winrt::com_ptr<ID3D12Resource>, 2> buffers;
+		unsigned int width;
+		unsigned int height;
+	};
+
 	swap_chain attach_swap_chain(
 		HWND window, const device_resources& device, D3D12_CPU_DESCRIPTOR_HANDLE rtv_base, IDXGIFactory3& factory)
 	{
@@ -271,32 +273,9 @@ namespace helium {
 				buffers.at(i).get(), &rtv_description, offset(rtv_base, device.size_table.rtv_size, i));
 		}
 
-		return {swap_chain.as<IDXGISwapChain3>(), std::move(buffers)};
-	}
+		winrt::check_hresult(swap_chain->GetDesc1(&description));
 
-	auto
-	get_backbuffers(const device_resources& device, IDXGISwapChain& swap_chain, D3D12_CPU_DESCRIPTOR_HANDLE rtv_base)
-	{
-		const std::array buffers {
-			winrt::capture<ID3D12Resource>(&swap_chain, &IDXGISwapChain::GetBuffer, 0),
-			winrt::capture<ID3D12Resource>(&swap_chain, &IDXGISwapChain::GetBuffer, 1)};
-
-		for (gsl::index i {}; i < 2; ++i) {
-			D3D12_RENDER_TARGET_VIEW_DESC description {};
-			description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-			description.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-			device.device->CreateRenderTargetView(
-				buffers.at(i).get(), &description, offset(rtv_base, device.size_table.rtv_size, i));
-		}
-
-		return buffers;
-	}
-
-	std::tuple<unsigned int, unsigned int> get_extent(HWND window)
-	{
-		RECT client {};
-		winrt::check_bool(GetClientRect(window, &client));
-		return std::make_tuple(client.right - client.left, client.bottom - client.top);
+		return {swap_chain.as<IDXGISwapChain3>(), std::move(buffers), description.Width, description.Height};
 	}
 
 	// Lots of reorganization opportunities here, around formats, order of initalization, and storing texture size / not
@@ -304,9 +283,8 @@ namespace helium {
 	// Mismatch between declaration order and how the data is actually initialized (initialization layout vs. packed
 	// layout) constness enforces constructor initializers
 	// Also, how to handle resizes?
+	// TODO: plenty of invariants to be enforced, methinks...
 	struct window_resources {
-		unsigned int width {};
-		unsigned int height {};
 		D3D12_CPU_DESCRIPTOR_HANDLE rtv_base {};
 		swap_chain swap_chain {};
 		D3D12_CPU_DESCRIPTOR_HANDLE dsv {};
@@ -314,11 +292,10 @@ namespace helium {
 
 		window_resources(const device_resources& device, HWND window, IDXGIFactory3& factory) : window_resources {}
 		{
-			std::tie(width, height) = get_extent(window);
 			rtv_base = device.rtv_heap->GetCPUDescriptorHandleForHeapStart();
 			swap_chain = attach_swap_chain(window, device, rtv_base, factory);
 			dsv = device.dsv_heap->GetCPUDescriptorHandleForHeapStart();
-			depth_buffer = create_depth_buffer(*device.device, dsv, width, height);
+			depth_buffer = create_depth_buffer(*device.device, dsv, swap_chain.width, swap_chain.height);
 		}
 
 		window_resources() = default;
@@ -338,15 +315,13 @@ namespace helium {
 		command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		command_list.OMSetRenderTargets(1, &rtv, false, &window_stuff.dsv);
 
-		const auto description = buffer.GetDesc(); // TODO: we should really be caching this stuff all in one spot
-
 		D3D12_RECT scissor {};
-		scissor.right = gsl::narrow<long>(description.Width);
-		scissor.bottom = gsl::narrow<long>(description.Height);
+		scissor.right = window_stuff.swap_chain.width;
+		scissor.bottom = window_stuff.swap_chain.height;
 
 		D3D12_VIEWPORT viewport {};
-		viewport.Width = gsl::narrow<float>(description.Width);
-		viewport.Height = gsl::narrow<float>(description.Height);
+		viewport.Width = gsl::narrow<float>(window_stuff.swap_chain.width);
+		viewport.Height = gsl::narrow<float>(window_stuff.swap_chain.height);
 		viewport.MaxDepth = 1.0f;
 
 		command_list.RSSetScissorRects(1, &scissor);
