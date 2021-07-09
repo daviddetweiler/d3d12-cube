@@ -1,7 +1,6 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
-#include <tuple>
 #include <utility>
 
 #include <gsl/gsl>
@@ -19,7 +18,6 @@
 
 namespace helium {
 	namespace {
-		constexpr auto is_d3d12_debugging_enabled = true;
 		constexpr auto ready_message = WM_USER;
 
 		LRESULT handle_message(HWND window, UINT message, WPARAM w, LPARAM l) noexcept
@@ -38,36 +36,6 @@ namespace helium {
 				return DefWindowProc(window, message, w, l);
 			}
 		}
-
-		class gpu_fence {
-		public:
-			gpu_fence(ID3D12Device& device) :
-				m_value {},
-				m_fence {
-					winrt::capture<ID3D12Fence>(&device, &ID3D12Device::CreateFence, m_value, D3D12_FENCE_FLAG_NONE)},
-				m_event {winrt::check_pointer(CreateEvent(nullptr, false, false, nullptr))}
-			{
-			}
-
-			// Otherwise counts get out of sync
-			gpu_fence(gpu_fence&) = delete;
-			gpu_fence& operator=(gpu_fence&) = delete;
-
-			void bump(ID3D12CommandQueue& queue) { winrt::check_hresult(queue.Signal(m_fence.get(), ++m_value)); }
-
-			void block()
-			{
-				if (m_fence->GetCompletedValue() < m_value) {
-					winrt::check_hresult(m_fence->SetEventOnCompletion(m_value, m_event.get()));
-					winrt::check_bool(WaitForSingleObject(m_event.get(), INFINITE) == WAIT_OBJECT_0);
-				}
-			}
-
-		private:
-			std::uint64_t m_value {};
-			winrt::com_ptr<ID3D12Fence> m_fence {};
-			winrt::handle m_event {};
-		};
 
 		auto create_device(IDXGIFactory6& factory)
 		{
@@ -108,18 +76,13 @@ namespace helium {
 				D3D12_COMMAND_LIST_FLAG_NONE);
 		}
 
-		auto create_default_pipeline_state(ID3D12Device& device)
+		auto create_default_pipeline_state(ID3D12Device& device, ID3D12RootSignature& root_signature)
 		{
 			const auto vertex_shader = load_compiled_shader(L"vertex.cso");
 			const auto pixel_shader = load_compiled_shader(L"pixel.cso");
 
-			// Used only for validating the pipeline, afaik
-			// Why do we even declare it in HLSL?
-			auto root_signature = winrt::capture<ID3D12RootSignature>(
-				&device, &ID3D12Device::CreateRootSignature, 0, vertex_shader.data(), vertex_shader.size());
-
 			D3D12_GRAPHICS_PIPELINE_STATE_DESC info {};
-			info.pRootSignature = root_signature.get();
+			info.pRootSignature = &root_signature;
 			info.VS.BytecodeLength = vertex_shader.size();
 			info.VS.pShaderBytecode = vertex_shader.data();
 			info.PS.BytecodeLength = pixel_shader.size();
@@ -138,13 +101,22 @@ namespace helium {
 			info.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 			info.SampleDesc.Count = 1;
 
-			return std::make_tuple(
-				std::move(root_signature),
-				winrt::capture<ID3D12PipelineState>(&device, &ID3D12Device::CreateGraphicsPipelineState, &info));
+			return winrt::capture<ID3D12PipelineState>(&device, &ID3D12Device::CreateGraphicsPipelineState, &info);
 		}
 
-		auto create_depth_buffer(
-			ID3D12Device& device, D3D12_CPU_DESCRIPTOR_HANDLE dsv, unsigned int width, unsigned int height)
+		auto create_root_signature(ID3D12Device& device)
+		{
+			D3D12_ROOT_SIGNATURE_DESC info {};
+			info.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+			winrt::com_ptr<ID3DBlob> result {};
+			winrt::com_ptr<ID3DBlob> error {};
+			winrt::check_hresult(
+				D3D12SerializeRootSignature(&info, D3D_ROOT_SIGNATURE_VERSION_1, result.put(), error.put()));
+			return winrt::capture<ID3D12RootSignature>(
+				&device, &ID3D12Device::CreateRootSignature, 0, result->GetBufferPointer(), result->GetBufferSize());
+		}
+
+		auto create_depth_buffer(ID3D12Device& device, D3D12_CPU_DESCRIPTOR_HANDLE dsv, const extent2d& size)
 		{
 			D3D12_HEAP_PROPERTIES properties {};
 			properties.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -152,8 +124,8 @@ namespace helium {
 			D3D12_RESOURCE_DESC info {};
 			info.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 			info.DepthOrArraySize = 1;
-			info.Width = width;
-			info.Height = height;
+			info.Width = size.width;
+			info.Height = size.height;
 			info.MipLevels = 1;
 			info.SampleDesc.Count = 1;
 			info.Format = DXGI_FORMAT_D32_FLOAT;
@@ -185,7 +157,7 @@ namespace helium {
 			ID3D12Device& device,
 			HWND window,
 			ID3D12CommandQueue& queue,
-			D3D12_CPU_DESCRIPTOR_HANDLE rtv_base)
+			D3D12_CPU_DESCRIPTOR_HANDLE rtvs)
 		{
 			DXGI_SWAP_CHAIN_DESC1 info {};
 			info.BufferCount = 2;
@@ -205,10 +177,27 @@ namespace helium {
 				device.CreateRenderTargetView(
 					get_buffer(*swap_chain, gsl::narrow_cast<unsigned int>(i)).get(),
 					&rtv_info,
-					offset(rtv_base, rtv_size, i));
+					offset(rtvs, rtv_size, i));
 			}
 
 			return swap_chain.as<IDXGISwapChain3>();
+		}
+
+		void maximize_rasterizer(ID3D12GraphicsCommandList& list, ID3D12Resource& target)
+		{
+			const auto info = target.GetDesc();
+
+			D3D12_RECT scissor {};
+			scissor.right = gsl::narrow_cast<long>(info.Width);
+			scissor.bottom = gsl::narrow_cast<long>(info.Height);
+
+			D3D12_VIEWPORT viewport {};
+			viewport.Width = gsl::narrow_cast<float>(info.Width);
+			viewport.Height = gsl::narrow_cast<float>(info.Height);
+			viewport.MaxDepth = 1.0f;
+
+			list.RSSetScissorRects(1, &scissor);
+			list.RSSetViewports(1, &viewport);
 		}
 
 		void record_commands(
@@ -225,27 +214,12 @@ namespace helium {
 			command_list.SetGraphicsRootSignature(&root_signature);
 			command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 			command_list.OMSetRenderTargets(1, &rtv, false, &dsv);
+			maximize_rasterizer(command_list, buffer);
 
-			const auto buffer_info = buffer.GetDesc();
-
-			D3D12_RECT scissor {};
-			scissor.right = gsl::narrow_cast<long>(buffer_info.Width);
-			scissor.bottom = gsl::narrow_cast<long>(buffer_info.Height);
-
-			D3D12_VIEWPORT viewport {};
-			viewport.Width = gsl::narrow_cast<float>(buffer_info.Width);
-			viewport.Height = gsl::narrow_cast<float>(buffer_info.Height);
-			viewport.MaxDepth = 1.0f;
-
-			command_list.RSSetScissorRects(1, &scissor);
-			command_list.RSSetViewports(1, &viewport);
-
-			std::array<D3D12_RESOURCE_BARRIER, 1> barriers {
-				transition(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
-
+			std::array barriers {transition(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
 			command_list.ResourceBarrier(gsl::narrow_cast<UINT>(barriers.size()), barriers.data());
 
-			std::array<float, 4> clear_color {0.0f, 0.0f, 0.0f, 1.0f};
+			std::array clear_color {0.0f, 0.0f, 0.0f, 1.0f};
 			command_list.ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 			command_list.ClearRenderTargetView(rtv, clear_color.data(), 0, nullptr);
 			command_list.DrawInstanced(3, 1, 0, 0);
@@ -256,50 +230,51 @@ namespace helium {
 			winrt::check_hresult(command_list.Close());
 		}
 
-		// TODO: Descriptor spans! Maybe...
-
-		void execute_game_thread(const std::atomic_bool& is_exit_required, HWND window)
+		void execute_game_thread(const std::atomic_bool& is_exit_required, HWND window, bool enable_debugging)
 		{
-			if constexpr (is_d3d12_debugging_enabled)
+			if (enable_debugging)
 				winrt::capture<ID3D12Debug>(D3D12GetDebugInterface)->EnableDebugLayer();
 
-			const auto factory = winrt::capture<IDXGIFactory6>(
-				CreateDXGIFactory2, is_d3d12_debugging_enabled ? DXGI_CREATE_FACTORY_DEBUG : 0);
+			const auto factory
+				= winrt::capture<IDXGIFactory6>(CreateDXGIFactory2, enable_debugging ? DXGI_CREATE_FACTORY_DEBUG : 0);
 
 			const auto device = create_device(*factory);
 			const auto queue = create_command_queue(*device);
-			gpu_fence fence {*device};
+			gpu_fence fence {*device, 2};
+
 			const auto rtv_heap = create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2);
 			const auto rtv_base = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+			const auto rtv_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
 			const auto dsv_heap = create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1);
 			const auto dsv_base = dsv_heap->GetCPUDescriptorHandleForHeapStart();
-			const auto swap_chain
-				= attach_swap_chain(*factory, *device, window, *queue, rtv_heap->GetCPUDescriptorHandleForHeapStart());
 
-			const auto [width, height] = get_extent(*swap_chain);
-			const auto depth_buffer
-				= create_depth_buffer(*device, dsv_heap->GetCPUDescriptorHandleForHeapStart(), width, height);
+			const auto root_signature = create_root_signature(*device);
+			const auto pipeline = create_default_pipeline_state(*device, *root_signature);
+			const std::array allocators {create_command_allocator(*device), create_command_allocator(*device)};
+			const std::array lists {create_command_list(*device), create_command_list(*device)};
 
-			const auto [root_signature, pipeline_state] = create_default_pipeline_state(*device);
-			const auto allocator = create_command_allocator(*device);
-			const auto list = create_command_list(*device);
-			const auto rtv_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+			const auto swap_chain = attach_swap_chain(*factory, *device, window, *queue, rtv_base);
+			const auto extent = get_extent(*swap_chain);
+			const auto depth_buffer = create_depth_buffer(*device, dsv_base, extent);
 
 			winrt::check_bool(PostMessage(window, ready_message, 0, 0));
 			while (!is_exit_required) {
-				fence.block();
+				fence.block(2);
 				const auto index = swap_chain->GetCurrentBackBufferIndex();
-				winrt::check_hresult(allocator->Reset());
+				auto& allocator = *allocators.at(index);
+				auto& list = *lists.at(index);
+				winrt::check_hresult(allocator.Reset());
 				record_commands(
-					*list,
-					*allocator,
-					*pipeline_state,
+					list,
+					allocator,
+					*pipeline,
 					*root_signature,
 					*get_buffer(*swap_chain, index),
 					offset(rtv_base, rtv_size, index),
 					dsv_base);
 
-				ID3D12CommandList* const list_pointer {list.get()};
+				ID3D12CommandList* const list_pointer {&list};
 				queue->ExecuteCommandLists(1, &list_pointer);
 				winrt::check_hresult(swap_chain->Present(1, 0));
 				fence.bump(*queue);
@@ -336,7 +311,7 @@ int WinMain(HINSTANCE self, HINSTANCE, char*, int)
 		nullptr));
 
 	std::atomic_bool is_exit_required {};
-	std::thread game_thread {[&is_exit_required, window] { execute_game_thread(is_exit_required, window); }};
+	std::thread game_thread {[&is_exit_required, window] { execute_game_thread(is_exit_required, window, false); }};
 
 	MSG message {};
 	while (GetMessage(&message, nullptr, 0, 0)) {
