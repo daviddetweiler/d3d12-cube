@@ -200,6 +200,31 @@ namespace helium {
 			list.RSSetViewports(1, &viewport);
 		}
 
+		auto create_upload_buffer(ID3D12Device& device, std::uint64_t size)
+		{
+			D3D12_HEAP_PROPERTIES heap {};
+			heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+			D3D12_RESOURCE_DESC info {};
+			info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+			info.Width = size;
+			info.Height = 1;
+			info.DepthOrArraySize = 1;
+			info.MipLevels = 1;
+			info.Format = DXGI_FORMAT_UNKNOWN;
+			info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+			info.SampleDesc.Count = 1;
+
+			return winrt::capture<ID3D12Resource>(
+				&device,
+				&ID3D12Device::CreateCommittedResource,
+				&heap,
+				D3D12_HEAP_FLAG_NONE,
+				&info,
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr);
+		}
+
 		void record_commands(
 			ID3D12GraphicsCommandList& command_list,
 			ID3D12CommandAllocator& allocator,
@@ -230,57 +255,96 @@ namespace helium {
 			winrt::check_hresult(command_list.Close());
 		}
 
-		void execute_game_thread(const std::atomic_bool& is_exit_required, HWND window, bool enable_debugging)
-		{
-			if (enable_debugging)
-				winrt::capture<ID3D12Debug>(D3D12GetDebugInterface)->EnableDebugLayer();
+		class d3d12_renderer {
+		public:
+			d3d12_renderer(HWND window, bool enable_debugging) :
+				d3d12_renderer {
+					*winrt::capture<IDXGIFactory6>(
+						CreateDXGIFactory2, enable_debugging ? DXGI_CREATE_FACTORY_DEBUG : 0),
+					window,
+					enable_debugging}
+			{
+			}
 
-			const auto factory
-				= winrt::capture<IDXGIFactory6>(CreateDXGIFactory2, enable_debugging ? DXGI_CREATE_FACTORY_DEBUG : 0);
+			d3d12_renderer(d3d12_renderer&) = delete;
+			d3d12_renderer(d3d12_renderer&&) = delete;
+			d3d12_renderer& operator=(d3d12_renderer&) = delete;
+			d3d12_renderer& operator=(d3d12_renderer&&) = delete;
 
-			const auto device = create_device(*factory);
-			const auto queue = create_command_queue(*device);
-			gpu_fence fence {*device, 2};
+			~d3d12_renderer() noexcept
+			{
+				GSL_SUPPRESS(f .6)
+				m_fence.block();
+			}
 
-			const auto rtv_heap = create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2);
-			const auto rtv_base = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-			const auto rtv_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-
-			const auto dsv_heap = create_descriptor_heap(*device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1);
-			const auto dsv_base = dsv_heap->GetCPUDescriptorHandleForHeapStart();
-
-			const auto root_signature = create_root_signature(*device);
-			const auto pipeline = create_default_pipeline_state(*device, *root_signature);
-			const std::array allocators {create_command_allocator(*device), create_command_allocator(*device)};
-			const std::array lists {create_command_list(*device), create_command_list(*device)};
-
-			const auto swap_chain = attach_swap_chain(*factory, *device, window, *queue, rtv_base);
-			const auto extent = get_extent(*swap_chain);
-			const auto depth_buffer = create_depth_buffer(*device, dsv_base, extent);
-
-			winrt::check_bool(PostMessage(window, ready_message, 0, 0));
-			while (!is_exit_required) {
-				fence.block(2);
-				const auto index = swap_chain->GetCurrentBackBufferIndex();
-				auto& allocator = *allocators.at(index);
-				auto& list = *lists.at(index);
+			void render()
+			{
+				m_fence.block(1);
+				const auto index = m_swap_chain->GetCurrentBackBufferIndex();
+				auto& allocator = *m_allocators.at(index);
+				auto& list = *m_command_lists.at(index);
 				winrt::check_hresult(allocator.Reset());
 				record_commands(
 					list,
 					allocator,
-					*pipeline,
-					*root_signature,
-					*get_buffer(*swap_chain, index),
-					offset(rtv_base, rtv_size, index),
-					dsv_base);
+					*m_pipeline,
+					*m_root_signature,
+					*get_buffer(*m_swap_chain, index),
+					offset(
+						m_rtv_heap->GetCPUDescriptorHandleForHeapStart(),
+						m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV),
+						index),
+					m_dsv_heap->GetCPUDescriptorHandleForHeapStart());
 
-				ID3D12CommandList* const list_pointer {&list};
-				queue->ExecuteCommandLists(1, &list_pointer);
-				winrt::check_hresult(swap_chain->Present(1, 0));
-				fence.bump(*queue);
+				execute(*m_queue, list);
+				winrt::check_hresult(m_swap_chain->Present(1, 0));
+				m_fence.bump(*m_queue);
 			}
 
-			fence.block();
+		private:
+			const winrt::com_ptr<ID3D12Device4> m_device {};
+			const winrt::com_ptr<ID3D12CommandQueue> m_queue {};
+			const winrt::com_ptr<ID3D12DescriptorHeap> m_rtv_heap {};
+			const winrt::com_ptr<ID3D12DescriptorHeap> m_dsv_heap {};
+			gpu_fence m_fence;
+
+			const winrt::com_ptr<ID3D12RootSignature> m_root_signature {};
+			const winrt::com_ptr<ID3D12PipelineState> m_pipeline {};
+			const std::array<winrt::com_ptr<ID3D12CommandAllocator>, 2> m_allocators {};
+			const std::array<winrt::com_ptr<ID3D12GraphicsCommandList>, 2> m_command_lists {};
+
+			const winrt::com_ptr<IDXGISwapChain3> m_swap_chain {};
+			const winrt::com_ptr<ID3D12Resource> m_depth_buffer {};
+
+			d3d12_renderer(IDXGIFactory6& factory, HWND window, bool enable_debugging) :
+				m_device {[enable_debugging, &factory] {
+					if (enable_debugging)
+						winrt::capture<ID3D12Debug>(D3D12GetDebugInterface)->EnableDebugLayer();
+
+					return create_device(factory);
+				}()},
+				m_queue {create_command_queue(*m_device)},
+				m_rtv_heap {create_descriptor_heap(*m_device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2)},
+				m_dsv_heap {create_descriptor_heap(*m_device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1)},
+				m_fence {*m_device, 1},
+				m_root_signature {create_root_signature(*m_device)},
+				m_pipeline {create_default_pipeline_state(*m_device, *m_root_signature)},
+				m_allocators {create_command_allocator(*m_device), create_command_allocator(*m_device)},
+				m_command_lists {create_command_list(*m_device), create_command_list(*m_device)},
+				m_swap_chain {attach_swap_chain(
+					factory, *m_device, window, *m_queue, m_rtv_heap->GetCPUDescriptorHandleForHeapStart())},
+				m_depth_buffer {create_depth_buffer(
+					*m_device, m_dsv_heap->GetCPUDescriptorHandleForHeapStart(), get_extent(*m_swap_chain))}
+			{
+			}
+		};
+
+		void execute_game_thread(const std::atomic_bool& is_exit_required, HWND window, bool enable_debugging)
+		{
+			d3d12_renderer renderer {window, enable_debugging};
+			winrt::check_bool(PostMessage(window, ready_message, 0, 0));
+			while (!is_exit_required)
+				renderer.render();
 		}
 	}
 }
@@ -311,7 +375,8 @@ int WinMain(HINSTANCE self, HINSTANCE, char*, int)
 		nullptr));
 
 	std::atomic_bool is_exit_required {};
-	std::thread game_thread {[&is_exit_required, window] { execute_game_thread(is_exit_required, window, false); }};
+	std::thread game_thread {
+		[&is_exit_required, window] { execute_game_thread(is_exit_required, window, IsDebuggerPresent()); }};
 
 	MSG message {};
 	while (GetMessage(&message, nullptr, 0, 0)) {

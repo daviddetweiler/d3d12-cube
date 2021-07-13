@@ -84,10 +84,16 @@ namespace helium {
 				winrt::check_bool(WaitForSingleObject(m_event.get(), INFINITE) == WAIT_OBJECT_0);
 			}
 		}
-
 	private:
 		std::uint64_t m_value {};
-		winrt::com_ptr<ID3D12Fence> m_fence {};
-		winrt::handle m_event {};
+		const winrt::com_ptr<ID3D12Fence> m_fence {};
+		const winrt::handle m_event {};
 	};
+
+	template <typename... list_types>
+	void execute(ID3D12CommandQueue& queue, list_types&&... lists)
+	{
+		const std::array<ID3D12CommandList*, sizeof...(lists)> list_array {(&lists, ...)};
+		queue.ExecuteCommandLists(gsl::narrow_cast<unsigned int>(list_array.size()), list_array.data());
+	}
 }
