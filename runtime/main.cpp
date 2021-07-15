@@ -15,6 +15,7 @@
 
 #include "d3d12_utilities.h"
 #include "shader_loading.h"
+#include "wavefront_loader.h"
 
 namespace helium {
 	namespace {
@@ -264,6 +265,7 @@ namespace helium {
 					window,
 					enable_debugging}
 			{
+				load_wavefront("cube.wv");
 			}
 
 			d3d12_renderer(d3d12_renderer&) = delete;
@@ -316,6 +318,8 @@ namespace helium {
 			const winrt::com_ptr<IDXGISwapChain3> m_swap_chain {};
 			const winrt::com_ptr<ID3D12Resource> m_depth_buffer {};
 
+			winrt::com_ptr<ID3D12Resource> m_upload_buffer {};
+
 			d3d12_renderer(IDXGIFactory6& factory, HWND window, bool enable_debugging) :
 				m_device {[enable_debugging, &factory] {
 					if (enable_debugging)
@@ -334,8 +338,14 @@ namespace helium {
 				m_swap_chain {attach_swap_chain(
 					factory, *m_device, window, *m_queue, m_rtv_heap->GetCPUDescriptorHandleForHeapStart())},
 				m_depth_buffer {create_depth_buffer(
-					*m_device, m_dsv_heap->GetCPUDescriptorHandleForHeapStart(), get_extent(*m_swap_chain))}
+					*m_device, m_dsv_heap->GetCPUDescriptorHandleForHeapStart(), get_extent(*m_swap_chain))},
+				m_upload_buffer {}
 			{
+				// Load object vertices, etc.
+
+				// Compute upload buffer size
+				// allocate buffer + buffers and views
+				// Execute upload steps (map, copy, unmap, gpu copies, wait for fence
 			}
 		};
 

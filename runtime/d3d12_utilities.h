@@ -1,4 +1,5 @@
-#pragma once
+#ifndef HELIUM_D3D12_UTILITIES_H
+#define HELIUM_D3D12_UTILITIES_H
 
 #include <cstddef>
 #include <cstdint>
@@ -97,3 +98,5 @@ namespace helium {
 		queue.ExecuteCommandLists(gsl::narrow_cast<unsigned int>(list_array.size()), list_array.data());
 	}
 }
+
+#endif

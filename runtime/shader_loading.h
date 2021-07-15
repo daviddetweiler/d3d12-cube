@@ -1,4 +1,5 @@
-#pragma once
+#ifndef HELIUM_SHADER_LOADING_H
+#define HELIUM_SHADER_LOADING_H
 
 #include <vector>
 
@@ -7,3 +8,5 @@
 namespace helium {
 	std::vector<char> load_compiled_shader(gsl::cwzstring<> name);
 }
+
+#endif

@@ -170,8 +170,10 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="shader_loading.cpp" />
+    <ClCompile Include="wavefront_loader.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="cube.wv" />
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
@@ -191,6 +193,7 @@
   <ItemGroup>
     <ClInclude Include="d3d12_utilities.h" />
     <ClInclude Include="shader_loading.h" />
+    <ClInclude Include="wavefront_loader.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
