@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstdint>
 #include <utility>
+#include <vector>
 
 #include <gsl/gsl>
 
@@ -201,20 +202,21 @@ namespace helium {
 			list.RSSetViewports(1, &viewport);
 		}
 
-		auto create_upload_buffer(ID3D12Device& device, std::uint64_t size)
+		auto create_upload_buffer(ID3D12Device& device, std::uint64_t size_in_bytes)
 		{
 			D3D12_HEAP_PROPERTIES heap {};
 			heap.Type = D3D12_HEAP_TYPE_UPLOAD;
 
 			D3D12_RESOURCE_DESC info {};
 			info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-			info.Width = size;
+			info.Width = size_in_bytes;
 			info.Height = 1;
 			info.DepthOrArraySize = 1;
 			info.MipLevels = 1;
 			info.Format = DXGI_FORMAT_UNKNOWN;
 			info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 			info.SampleDesc.Count = 1;
+			info.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
 
 			return winrt::capture<ID3D12Resource>(
 				&device,
@@ -226,6 +228,82 @@ namespace helium {
 				nullptr);
 		}
 
+		struct vertex_buffer {
+			winrt::com_ptr<ID3D12Resource> buffer;
+			D3D12_VERTEX_BUFFER_VIEW view;
+		};
+
+		struct index_buffer {
+			winrt::com_ptr<ID3D12Resource> buffer;
+			D3D12_INDEX_BUFFER_VIEW view;
+		};
+
+		index_buffer create_index_buffer(ID3D12Device& device, std::uint64_t size)
+		{
+			D3D12_HEAP_PROPERTIES heap {};
+			heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+			D3D12_RESOURCE_DESC info {};
+			info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+			info.Width = size * sizeof(unsigned int);
+			info.Height = 1;
+			info.DepthOrArraySize = 1;
+			info.MipLevels = 1;
+			info.Format = DXGI_FORMAT_UNKNOWN;
+			info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+			info.SampleDesc.Count = 1;
+			info.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+
+			auto buffer = winrt::capture<ID3D12Resource>(
+				&device,
+				&ID3D12Device::CreateCommittedResource,
+				&heap,
+				D3D12_HEAP_FLAG_NONE,
+				&info,
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr);
+
+			D3D12_INDEX_BUFFER_VIEW view {};
+			view.BufferLocation = buffer->GetGPUVirtualAddress();
+			view.SizeInBytes = gsl::narrow_cast<UINT>(info.Width);
+			view.Format = DXGI_FORMAT_R32_UINT;
+
+			return {std::move(buffer), view};
+		}
+
+		vertex_buffer create_vertex_buffer(ID3D12Device& device, std::uint64_t size, std::uint64_t elem_size)
+		{
+			D3D12_HEAP_PROPERTIES heap {};
+			heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+			D3D12_RESOURCE_DESC info {};
+			info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+			info.Width = size * elem_size;
+			info.Height = 1;
+			info.DepthOrArraySize = 1;
+			info.MipLevels = 1;
+			info.Format = DXGI_FORMAT_UNKNOWN;
+			info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+			info.SampleDesc.Count = 1;
+			info.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+
+			auto buffer = winrt::capture<ID3D12Resource>(
+				&device,
+				&ID3D12Device::CreateCommittedResource,
+				&heap,
+				D3D12_HEAP_FLAG_NONE,
+				&info,
+				D3D12_RESOURCE_STATE_GENERIC_READ,
+				nullptr);
+
+			D3D12_VERTEX_BUFFER_VIEW view {};
+			view.BufferLocation = buffer->GetGPUVirtualAddress();
+			view.SizeInBytes = gsl::narrow_cast<UINT>(info.Width);
+			view.StrideInBytes = gsl::narrow_cast<UINT>(elem_size);
+
+			return {std::move(buffer), view};
+		}
+
 		void record_commands(
 			ID3D12GraphicsCommandList& command_list,
 			ID3D12CommandAllocator& allocator,
@@ -233,12 +311,16 @@ namespace helium {
 			ID3D12RootSignature& root_signature,
 			ID3D12Resource& buffer,
 			D3D12_CPU_DESCRIPTOR_HANDLE rtv,
-			D3D12_CPU_DESCRIPTOR_HANDLE dsv)
+			D3D12_CPU_DESCRIPTOR_HANDLE dsv,
+			const D3D12_VERTEX_BUFFER_VIEW& vertices,
+			const D3D12_INDEX_BUFFER_VIEW& indices)
 		{
 			winrt::check_hresult(command_list.Reset(&allocator, &pipeline_state));
 
 			command_list.SetGraphicsRootSignature(&root_signature);
 			command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			command_list.IASetVertexBuffers(0, 1, &vertices);
+			command_list.IASetIndexBuffer(&indices);
 			command_list.OMSetRenderTargets(1, &rtv, false, &dsv);
 			maximize_rasterizer(command_list, buffer);
 
@@ -265,7 +347,20 @@ namespace helium {
 					window,
 					enable_debugging}
 			{
-				load_wavefront("cube.wv");
+				const auto object = load_wavefront("cube.wv");
+				const auto& vertices = object.positions;
+				std::vector<unsigned int> indices(object.faces.size() * 3);
+				for (gsl::index i {}; i < gsl::narrow_cast<gsl::index>(object.faces.size()); ++i) {
+					const auto& face = object.faces.at(i);
+					for (gsl::index j {}; j < 3; ++j)
+						indices.at(i + j) = face.indices.at(j);
+				}
+
+				m_upload_buffer = create_upload_buffer(
+					*m_device, indices.size() * sizeof(unsigned int) + vertices.size() * sizeof(vector3));
+
+				m_vertices = create_vertex_buffer(*m_device, vertices.size(), sizeof(vector3));
+				m_indices = create_index_buffer(*m_device, indices.size());
 			}
 
 			d3d12_renderer(d3d12_renderer&) = delete;
@@ -296,7 +391,9 @@ namespace helium {
 						m_rtv_heap->GetCPUDescriptorHandleForHeapStart(),
 						m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV),
 						index),
-					m_dsv_heap->GetCPUDescriptorHandleForHeapStart());
+					m_dsv_heap->GetCPUDescriptorHandleForHeapStart(),
+					m_vertices.view,
+					m_indices.view);
 
 				execute(*m_queue, list);
 				winrt::check_hresult(m_swap_chain->Present(1, 0));
@@ -319,6 +416,9 @@ namespace helium {
 			const winrt::com_ptr<ID3D12Resource> m_depth_buffer {};
 
 			winrt::com_ptr<ID3D12Resource> m_upload_buffer {};
+
+			vertex_buffer m_vertices {};
+			index_buffer m_indices {};
 
 			d3d12_renderer(IDXGIFactory6& factory, HWND window, bool enable_debugging) :
 				m_device {[enable_debugging, &factory] {
