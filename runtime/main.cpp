@@ -1,6 +1,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <iterator>
 #include <utility>
 #include <vector>
 
@@ -102,6 +103,14 @@ namespace helium {
 			info.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 			info.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 			info.SampleDesc.Count = 1;
+
+			D3D12_INPUT_ELEMENT_DESC position {};
+			position.Format = DXGI_FORMAT_R32G32B32_FLOAT;
+			position.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+			position.SemanticName = "POSITION";
+
+			info.InputLayout.NumElements = 1;
+			info.InputLayout.pInputElementDescs = &position;
 
 			return winrt::capture<ID3D12PipelineState>(&device, &ID3D12Device::CreateGraphicsPipelineState, &info);
 		}
@@ -236,9 +245,10 @@ namespace helium {
 		struct index_buffer {
 			winrt::com_ptr<ID3D12Resource> buffer;
 			D3D12_INDEX_BUFFER_VIEW view;
+			unsigned int size;
 		};
 
-		index_buffer create_index_buffer(ID3D12Device& device, std::uint64_t size)
+		index_buffer create_index_buffer(ID3D12Device& device, unsigned int size)
 		{
 			D3D12_HEAP_PROPERTIES heap {};
 			heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -260,7 +270,7 @@ namespace helium {
 				&heap,
 				D3D12_HEAP_FLAG_NONE,
 				&info,
-				D3D12_RESOURCE_STATE_GENERIC_READ,
+				D3D12_RESOURCE_STATE_COPY_DEST,
 				nullptr);
 
 			D3D12_INDEX_BUFFER_VIEW view {};
@@ -268,7 +278,7 @@ namespace helium {
 			view.SizeInBytes = gsl::narrow_cast<UINT>(info.Width);
 			view.Format = DXGI_FORMAT_R32_UINT;
 
-			return {std::move(buffer), view};
+			return {std::move(buffer), view, size};
 		}
 
 		vertex_buffer create_vertex_buffer(ID3D12Device& device, std::uint64_t size, std::uint64_t elem_size)
@@ -293,7 +303,7 @@ namespace helium {
 				&heap,
 				D3D12_HEAP_FLAG_NONE,
 				&info,
-				D3D12_RESOURCE_STATE_GENERIC_READ,
+				D3D12_RESOURCE_STATE_COPY_DEST,
 				nullptr);
 
 			D3D12_VERTEX_BUFFER_VIEW view {};
@@ -312,15 +322,15 @@ namespace helium {
 			ID3D12Resource& buffer,
 			D3D12_CPU_DESCRIPTOR_HANDLE rtv,
 			D3D12_CPU_DESCRIPTOR_HANDLE dsv,
-			const D3D12_VERTEX_BUFFER_VIEW& vertices,
-			const D3D12_INDEX_BUFFER_VIEW& indices)
+			const vertex_buffer& vertices,
+			const index_buffer& indices)
 		{
 			winrt::check_hresult(command_list.Reset(&allocator, &pipeline_state));
 
 			command_list.SetGraphicsRootSignature(&root_signature);
 			command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-			command_list.IASetVertexBuffers(0, 1, &vertices);
-			command_list.IASetIndexBuffer(&indices);
+			command_list.IASetVertexBuffers(0, 1, &vertices.view);
+			command_list.IASetIndexBuffer(&indices.view);
 			command_list.OMSetRenderTargets(1, &rtv, false, &dsv);
 			maximize_rasterizer(command_list, buffer);
 
@@ -330,7 +340,7 @@ namespace helium {
 			std::array clear_color {0.0f, 0.0f, 0.0f, 1.0f};
 			command_list.ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 			command_list.ClearRenderTargetView(rtv, clear_color.data(), 0, nullptr);
-			command_list.DrawInstanced(3, 1, 0, 0);
+			command_list.DrawIndexedInstanced(indices.size, 1, 0, 0, 0);
 
 			reverse(barriers.at(0));
 			command_list.ResourceBarrier(gsl::narrow_cast<UINT>(barriers.size()), barriers.data());
@@ -353,14 +363,46 @@ namespace helium {
 				for (gsl::index i {}; i < gsl::narrow_cast<gsl::index>(object.faces.size()); ++i) {
 					const auto& face = object.faces.at(i);
 					for (gsl::index j {}; j < 3; ++j)
-						indices.at(i + j) = face.indices.at(j);
+						indices.at(i + j) = face.indices.at(j) - 1;
 				}
 
-				m_upload_buffer = create_upload_buffer(
+				const auto upload_buffer = create_upload_buffer(
 					*m_device, indices.size() * sizeof(unsigned int) + vertices.size() * sizeof(vector3));
 
 				m_vertices = create_vertex_buffer(*m_device, vertices.size(), sizeof(vector3));
-				m_indices = create_index_buffer(*m_device, indices.size());
+				m_indices = create_index_buffer(*m_device, gsl::narrow<unsigned int>(indices.size()));
+
+				D3D12_RANGE range {};
+				void* data {};
+				winrt::check_hresult(upload_buffer->Map(0, &range, &data));
+				std::memcpy(data, indices.data(), indices.size() * sizeof(unsigned int));
+				std::memcpy(
+					std::next(static_cast<char*>(data), indices.size() * sizeof(unsigned int)),
+					vertices.data(),
+					vertices.size() * sizeof(vector3));
+
+				upload_buffer->Unmap(0, &range);
+
+				// Need to execute copy commands here
+				auto& list = *m_command_lists.front();
+				auto& allocator = *m_allocators.front();
+				winrt::check_hresult(allocator.Reset());
+				winrt::check_hresult(list.Reset(&allocator, nullptr));
+
+				list.CopyBufferRegion(
+					m_indices.buffer.get(), 0, upload_buffer.get(), 0, indices.size() * sizeof(unsigned int));
+
+				list.CopyBufferRegion(
+					m_vertices.buffer.get(),
+					0,
+					upload_buffer.get(),
+					indices.size() * sizeof(unsigned int),
+					vertices.size() * sizeof(vector3));
+
+				winrt::check_hresult(list.Close());
+				execute(*m_queue, list);
+				m_fence.bump(*m_queue);
+				m_fence.block();
 			}
 
 			d3d12_renderer(d3d12_renderer&) = delete;
@@ -392,8 +434,8 @@ namespace helium {
 						m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV),
 						index),
 					m_dsv_heap->GetCPUDescriptorHandleForHeapStart(),
-					m_vertices.view,
-					m_indices.view);
+					m_vertices,
+					m_indices);
 
 				execute(*m_queue, list);
 				winrt::check_hresult(m_swap_chain->Present(1, 0));
@@ -415,8 +457,6 @@ namespace helium {
 			const winrt::com_ptr<IDXGISwapChain3> m_swap_chain {};
 			const winrt::com_ptr<ID3D12Resource> m_depth_buffer {};
 
-			winrt::com_ptr<ID3D12Resource> m_upload_buffer {};
-
 			vertex_buffer m_vertices {};
 			index_buffer m_indices {};
 
@@ -430,7 +470,7 @@ namespace helium {
 				m_queue {create_command_queue(*m_device)},
 				m_rtv_heap {create_descriptor_heap(*m_device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2)},
 				m_dsv_heap {create_descriptor_heap(*m_device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1)},
-				m_fence {*m_device, 1},
+				m_fence {*m_device},
 				m_root_signature {create_root_signature(*m_device)},
 				m_pipeline {create_default_pipeline_state(*m_device, *m_root_signature)},
 				m_allocators {create_command_allocator(*m_device), create_command_allocator(*m_device)},
@@ -438,14 +478,8 @@ namespace helium {
 				m_swap_chain {attach_swap_chain(
 					factory, *m_device, window, *m_queue, m_rtv_heap->GetCPUDescriptorHandleForHeapStart())},
 				m_depth_buffer {create_depth_buffer(
-					*m_device, m_dsv_heap->GetCPUDescriptorHandleForHeapStart(), get_extent(*m_swap_chain))},
-				m_upload_buffer {}
+					*m_device, m_dsv_heap->GetCPUDescriptorHandleForHeapStart(), get_extent(*m_swap_chain))}
 			{
-				// Load object vertices, etc.
-
-				// Compute upload buffer size
-				// allocate buffer + buffers and views
-				// Execute upload steps (map, copy, unmap, gpu copies, wait for fence
 			}
 		};
 
