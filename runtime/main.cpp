@@ -363,7 +363,7 @@ namespace helium {
 				for (gsl::index i {}; i < gsl::narrow_cast<gsl::index>(object.faces.size()); ++i) {
 					const auto& face = object.faces.at(i);
 					for (gsl::index j {}; j < 3; ++j)
-						indices.at(i + j) = face.indices.at(j) - 1;
+						indices.at(i * 3 + j) = face.indices.at(j) - 1;
 				}
 
 				const auto upload_buffer = create_upload_buffer(
