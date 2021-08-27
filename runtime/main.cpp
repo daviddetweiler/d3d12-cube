@@ -340,6 +340,28 @@ namespace helium {
 			std::uint8_t padding[128];
 		};
 
+		struct descriptor_heaps {
+			const winrt::com_ptr<ID3D12DescriptorHeap> m_rtv_heap {};
+			const winrt::com_ptr<ID3D12DescriptorHeap> m_dsv_heap {};
+			const winrt::com_ptr<ID3D12DescriptorHeap> m_cbv_srv_uav_heap {};
+			const D3D12_CPU_DESCRIPTOR_HANDLE rtv_base {};
+			const D3D12_CPU_DESCRIPTOR_HANDLE dsv_base {};
+			const D3D12_CPU_DESCRIPTOR_HANDLE csu_base {};
+
+			descriptor_heaps() = default;
+
+			descriptor_heaps(ID3D12Device& device) :
+				m_rtv_heap {create_descriptor_heap(device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2)},
+				m_dsv_heap {create_descriptor_heap(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1)},
+				m_cbv_srv_uav_heap {create_descriptor_heap(
+					device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)},
+				rtv_base {m_rtv_heap->GetCPUDescriptorHandleForHeapStart()},
+				dsv_base {m_dsv_heap->GetCPUDescriptorHandleForHeapStart()},
+				csu_base {m_cbv_srv_uav_heap->GetCPUDescriptorHandleForHeapStart()}
+			{
+			}
+		};
+
 		static_assert(sizeof(view_matrices) >= 256);
 
 		winrt::com_ptr<ID3D12Resource> create_matrix_buffer(ID3D12Device& device, D3D12_CPU_DESCRIPTOR_HANDLE cbv)
@@ -467,7 +489,7 @@ namespace helium {
 			D3D12_CPU_DESCRIPTOR_HANDLE rtv,
 			D3D12_CPU_DESCRIPTOR_HANDLE dsv,
 			D3D12_GPU_DESCRIPTOR_HANDLE cbv_srv_uav_table,
-			ID3D12DescriptorHeap& cbv_heap,
+			const descriptor_heaps& heaps,
 			ID3D12Resource& upload_buffer,
 			const render_state& state)
 		{
@@ -480,7 +502,7 @@ namespace helium {
 			command_list.OMSetRenderTargets(1, &rtv, false, &dsv);
 			maximize_rasterizer(command_list, buffer);
 
-			const auto heap_ptr = &cbv_heap;
+			const auto heap_ptr = heaps.m_cbv_srv_uav_heap.get();
 			command_list.SetDescriptorHeaps(1, &heap_ptr);
 			command_list.SetGraphicsRootDescriptorTable(0, cbv_srv_uav_table);
 
@@ -540,13 +562,13 @@ namespace helium {
 				auto& allocator = *m_allocators.at(index);
 				auto& list = *m_command_lists.at(index);
 				auto& buffer = *get_buffer(*m_swap_chain, index);
-				const auto dsv = m_dsv_heap->GetCPUDescriptorHandleForHeapStart();
+				const auto dsv = m_heaps.dsv_base;
 				const auto rtv = offset(
-					m_rtv_heap->GetCPUDescriptorHandleForHeapStart(),
+					m_heaps.rtv_base,
 					m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV),
 					index);
 
-				const auto cbvs = m_cbv_srv_uav_heap->GetGPUDescriptorHandleForHeapStart();
+				const auto cbvs = m_heaps.m_cbv_srv_uav_heap->GetGPUDescriptorHandleForHeapStart();
 
 				winrt::check_hresult(allocator.Reset());
 
@@ -560,7 +582,7 @@ namespace helium {
 					rtv,
 					dsv,
 					cbvs,
-					*m_cbv_srv_uav_heap,
+					m_heaps,
 					*m_upload_buffer,
 					m_state);
 
@@ -572,10 +594,8 @@ namespace helium {
 		private:
 			const winrt::com_ptr<ID3D12Device4> m_device {};
 			const winrt::com_ptr<ID3D12CommandQueue> m_queue {};
-			const winrt::com_ptr<ID3D12DescriptorHeap> m_rtv_heap {};
-			const winrt::com_ptr<ID3D12DescriptorHeap> m_dsv_heap {};
-			const winrt::com_ptr<ID3D12DescriptorHeap> m_cbv_srv_uav_heap {};
 			const winrt::com_ptr<ID3D12Resource> m_upload_buffer {};
+			const descriptor_heaps m_heaps {};
 			gpu_fence m_fence;
 
 			const winrt::com_ptr<ID3D12RootSignature> m_root_signature {};
@@ -594,25 +614,17 @@ namespace helium {
 					return create_device(factory);
 				}(enable_debugging, factory)},
 				m_queue {create_command_queue(*m_device)},
-				m_rtv_heap {create_descriptor_heap(*m_device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2)},
-				m_dsv_heap {create_descriptor_heap(*m_device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1)},
-				m_cbv_srv_uav_heap {create_descriptor_heap(
-					*m_device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)},
 				m_upload_buffer {create_upload_buffer(
 					*m_device,
 					sizeof(view_matrices))}, // FIXME: a horrid hack, we should only have one upload ringbuffer
+				m_heaps {*m_device},
 				m_fence {*m_device},
 				m_root_signature {create_root_signature(*m_device)},
 				m_pipeline {create_default_pipeline_state(*m_device, *m_root_signature)},
 				m_allocators {create_command_allocator(*m_device), create_command_allocator(*m_device)},
 				m_command_lists {create_command_list(*m_device), create_command_list(*m_device)},
-				m_swap_chain {attach_swap_chain(
-					factory, *m_device, window, *m_queue, m_rtv_heap->GetCPUDescriptorHandleForHeapStart())},
-				m_state {
-					*m_device,
-					*m_swap_chain,
-					m_dsv_heap->GetCPUDescriptorHandleForHeapStart(),
-					m_cbv_srv_uav_heap->GetCPUDescriptorHandleForHeapStart()}
+				m_swap_chain {attach_swap_chain(factory, *m_device, window, *m_queue, m_heaps.rtv_base)},
+				m_state {*m_device, *m_swap_chain, m_heaps.dsv_base, m_heaps.csu_base}
 			{
 			}
 		};
