@@ -379,6 +379,62 @@ namespace helium {
 			index_buffer m_indices {};
 		};
 
+		geometry_buffers prepare_geometry_load(
+			ID3D12Device& device,
+			ID3D12GraphicsCommandList& list,
+			ID3D12CommandAllocator& allocator,
+			ID3D12CommandQueue& queue,
+			gpu_fence& fence)
+		{
+			geometry_buffers geometry;
+
+			const auto object = load_wavefront("cube.wv");
+			const auto& vertices = object.positions;
+			std::vector<unsigned int> indices(object.faces.size() * 3);
+			for (gsl::index i {}; i < gsl::narrow_cast<gsl::index>(object.faces.size()); ++i) {
+				const auto& face = object.faces.at(i);
+				for (gsl::index j {}; j < 3; ++j)
+					indices.at(i * 3 + j) = face.indices.at(j) - 1;
+			}
+
+			const auto upload_buffer = create_upload_buffer(
+				device, indices.size() * sizeof(unsigned int) + vertices.size() * sizeof(vector3));
+
+			geometry.m_vertices = create_vertex_buffer(device, vertices.size(), sizeof(vector3));
+			geometry.m_indices = create_index_buffer(device, gsl::narrow<unsigned int>(indices.size()));
+
+			D3D12_RANGE range {};
+			void* data {};
+			winrt::check_hresult(upload_buffer->Map(0, &range, &data));
+			std::memcpy(data, indices.data(), indices.size() * sizeof(unsigned int));
+			std::memcpy(
+				std::next(static_cast<char*>(data), indices.size() * sizeof(unsigned int)),
+				vertices.data(),
+				vertices.size() * sizeof(vector3));
+
+			upload_buffer->Unmap(0, &range);
+
+			winrt::check_hresult(allocator.Reset());
+			winrt::check_hresult(list.Reset(&allocator, nullptr));
+
+			list.CopyBufferRegion(
+				geometry.m_indices.buffer.get(), 0, upload_buffer.get(), 0, indices.size() * sizeof(unsigned int));
+
+			list.CopyBufferRegion(
+				geometry.m_vertices.buffer.get(),
+				0,
+				upload_buffer.get(),
+				indices.size() * sizeof(unsigned int),
+				vertices.size() * sizeof(vector3));
+
+			winrt::check_hresult(list.Close());
+			execute(queue, list);
+			fence.bump(queue);
+			fence.block();
+
+			return geometry;
+		}
+
 		struct render_state {
 			const winrt::com_ptr<ID3D12Resource> m_depth_buffer {};
 			geometry_buffers geometry;
@@ -460,56 +516,10 @@ namespace helium {
 					window,
 					enable_debugging}
 			{
-				const auto object = load_wavefront("cube.wv");
-				const auto& vertices = object.positions;
-				std::vector<unsigned int> indices(object.faces.size() * 3);
-				for (gsl::index i {}; i < gsl::narrow_cast<gsl::index>(object.faces.size()); ++i) {
-					const auto& face = object.faces.at(i);
-					for (gsl::index j {}; j < 3; ++j)
-						indices.at(i * 3 + j) = face.indices.at(j) - 1;
-				}
-
-				const auto upload_buffer = create_upload_buffer(
-					*m_device, indices.size() * sizeof(unsigned int) + vertices.size() * sizeof(vector3));
-
-				m_state.geometry.m_vertices = create_vertex_buffer(*m_device, vertices.size(), sizeof(vector3));
-				m_state.geometry.m_indices = create_index_buffer(*m_device, gsl::narrow<unsigned int>(indices.size()));
-
-				D3D12_RANGE range {};
-				void* data {};
-				winrt::check_hresult(upload_buffer->Map(0, &range, &data));
-				std::memcpy(data, indices.data(), indices.size() * sizeof(unsigned int));
-				std::memcpy(
-					std::next(static_cast<char*>(data), indices.size() * sizeof(unsigned int)),
-					vertices.data(),
-					vertices.size() * sizeof(vector3));
-
-				upload_buffer->Unmap(0, &range);
-
 				// Need to execute copy commands here
 				auto& list = *m_command_lists.front();
 				auto& allocator = *m_allocators.front();
-				winrt::check_hresult(allocator.Reset());
-				winrt::check_hresult(list.Reset(&allocator, nullptr));
-
-				list.CopyBufferRegion(
-					m_state.geometry.m_indices.buffer.get(),
-					0,
-					upload_buffer.get(),
-					0,
-					indices.size() * sizeof(unsigned int));
-
-				list.CopyBufferRegion(
-					m_state.geometry.m_vertices.buffer.get(),
-					0,
-					upload_buffer.get(),
-					indices.size() * sizeof(unsigned int),
-					vertices.size() * sizeof(vector3));
-
-				winrt::check_hresult(list.Close());
-				execute(*m_queue, list);
-				m_fence.bump(*m_queue);
-				m_fence.block();
+				m_state.geometry = prepare_geometry_load(*m_device, list, allocator, *m_queue, m_fence);
 			}
 
 			d3d12_renderer(d3d12_renderer&) = delete;
@@ -602,7 +612,7 @@ namespace helium {
 					*m_device,
 					*m_swap_chain,
 					m_dsv_heap->GetCPUDescriptorHandleForHeapStart(),
-					m_rtv_heap->GetCPUDescriptorHandleForHeapStart()}
+					m_cbv_srv_uav_heap->GetCPUDescriptorHandleForHeapStart()}
 			{
 			}
 		};
