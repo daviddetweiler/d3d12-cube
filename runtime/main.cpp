@@ -374,6 +374,34 @@ namespace helium {
 			return buffer;
 		}
 
+		struct geometry_buffers {
+			vertex_buffer m_vertices {};
+			index_buffer m_indices {};
+		};
+
+		struct render_state {
+			const winrt::com_ptr<ID3D12Resource> m_depth_buffer {};
+			geometry_buffers geometry;
+			view_matrices m_matrices {};
+			const winrt::com_ptr<ID3D12Resource> m_matrix_buffer {};
+
+			render_state() = default;
+
+			render_state(
+				ID3D12Device& device,
+				IDXGISwapChain1& swap_chain,
+				D3D12_CPU_DESCRIPTOR_HANDLE dsv,
+				D3D12_CPU_DESCRIPTOR_HANDLE cbv) :
+				m_depth_buffer {create_depth_buffer(device, dsv, get_extent(swap_chain))},
+				geometry {},
+				m_matrices {
+					DirectX::XMMatrixTranslation(0.0f, 0.0f, -0.9f),
+					DirectX::XMMatrixOrthographicLH(1.0f, 1.0f, 0.0f, 100.0f)},
+				m_matrix_buffer {create_matrix_buffer(device, cbv)}
+			{
+			}
+		};
+
 		void record_commands(
 			ID3D12GraphicsCommandList& command_list,
 			ID3D12CommandAllocator& allocator,
@@ -384,18 +412,15 @@ namespace helium {
 			D3D12_CPU_DESCRIPTOR_HANDLE dsv,
 			D3D12_GPU_DESCRIPTOR_HANDLE cbv_srv_uav_table,
 			ID3D12DescriptorHeap& cbv_heap,
-			const view_matrices& matrices,
-			ID3D12Resource& matrix_buffer,
 			ID3D12Resource& upload_buffer,
-			const vertex_buffer& vertices,
-			const index_buffer& indices)
+			const render_state& state)
 		{
 			winrt::check_hresult(command_list.Reset(&allocator, &pipeline_state));
 
 			command_list.SetGraphicsRootSignature(&root_signature);
 			command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-			command_list.IASetVertexBuffers(0, 1, &vertices.view);
-			command_list.IASetIndexBuffer(&indices.view);
+			command_list.IASetVertexBuffers(0, 1, &state.geometry.m_vertices.view);
+			command_list.IASetIndexBuffer(&state.geometry.m_indices.view);
 			command_list.OMSetRenderTargets(1, &rtv, false, &dsv);
 			maximize_rasterizer(command_list, buffer);
 
@@ -406,11 +431,11 @@ namespace helium {
 			D3D12_RANGE range {};
 			void* data {};
 			winrt::check_hresult(upload_buffer.Map(0, &range, &data));
-			std::memcpy(data, &matrices, sizeof(matrices));
+			std::memcpy(data, &state.m_matrices, sizeof(state.m_matrices));
 			upload_buffer.Unmap(0, &range);
 
 			// FIXME: we don't check that the upload buffer is big enough
-			command_list.CopyBufferRegion(&matrix_buffer, 0, &upload_buffer, 0, sizeof(matrices));
+			command_list.CopyBufferRegion(state.m_matrix_buffer.get(), 0, &upload_buffer, 0, sizeof(state.m_matrices));
 
 			std::array barriers {transition(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
 			command_list.ResourceBarrier(gsl::narrow_cast<UINT>(barriers.size()), barriers.data());
@@ -418,7 +443,7 @@ namespace helium {
 			std::array clear_color {0.0f, 0.0f, 0.0f, 1.0f};
 			command_list.ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 			command_list.ClearRenderTargetView(rtv, clear_color.data(), 0, nullptr);
-			command_list.DrawIndexedInstanced(indices.size, 1, 0, 0, 0);
+			command_list.DrawIndexedInstanced(state.geometry.m_indices.size, 1, 0, 0, 0);
 
 			reverse(barriers.at(0));
 			command_list.ResourceBarrier(gsl::narrow_cast<UINT>(barriers.size()), barriers.data());
@@ -447,8 +472,8 @@ namespace helium {
 				const auto upload_buffer = create_upload_buffer(
 					*m_device, indices.size() * sizeof(unsigned int) + vertices.size() * sizeof(vector3));
 
-				m_vertices = create_vertex_buffer(*m_device, vertices.size(), sizeof(vector3));
-				m_indices = create_index_buffer(*m_device, gsl::narrow<unsigned int>(indices.size()));
+				m_state.geometry.m_vertices = create_vertex_buffer(*m_device, vertices.size(), sizeof(vector3));
+				m_state.geometry.m_indices = create_index_buffer(*m_device, gsl::narrow<unsigned int>(indices.size()));
 
 				D3D12_RANGE range {};
 				void* data {};
@@ -468,10 +493,14 @@ namespace helium {
 				winrt::check_hresult(list.Reset(&allocator, nullptr));
 
 				list.CopyBufferRegion(
-					m_indices.buffer.get(), 0, upload_buffer.get(), 0, indices.size() * sizeof(unsigned int));
+					m_state.geometry.m_indices.buffer.get(),
+					0,
+					upload_buffer.get(),
+					0,
+					indices.size() * sizeof(unsigned int));
 
 				list.CopyBufferRegion(
-					m_vertices.buffer.get(),
+					m_state.geometry.m_vertices.buffer.get(),
 					0,
 					upload_buffer.get(),
 					indices.size() * sizeof(unsigned int),
@@ -522,11 +551,8 @@ namespace helium {
 					dsv,
 					cbvs,
 					*m_cbv_srv_uav_heap,
-					m_matrices,
-					*m_matrix_buffer,
 					*m_upload_buffer,
-					m_vertices,
-					m_indices);
+					m_state);
 
 				execute(*m_queue, list);
 				winrt::check_hresult(m_swap_chain->Present(1, 0));
@@ -548,13 +574,7 @@ namespace helium {
 			const std::array<winrt::com_ptr<ID3D12GraphicsCommandList>, 2> m_command_lists {};
 
 			const winrt::com_ptr<IDXGISwapChain3> m_swap_chain {};
-			const winrt::com_ptr<ID3D12Resource> m_depth_buffer {};
-
-			vertex_buffer m_vertices {};
-			index_buffer m_indices {};
-
-			view_matrices m_matrices {};
-			const winrt::com_ptr<ID3D12Resource> m_matrix_buffer {};
+			render_state m_state {};
 
 			d3d12_renderer(IDXGIFactory6& factory, HWND window, bool enable_debugging) :
 				m_device {[](auto&& enable_debugging, auto&& factory) {
@@ -578,15 +598,11 @@ namespace helium {
 				m_command_lists {create_command_list(*m_device), create_command_list(*m_device)},
 				m_swap_chain {attach_swap_chain(
 					factory, *m_device, window, *m_queue, m_rtv_heap->GetCPUDescriptorHandleForHeapStart())},
-				m_depth_buffer {create_depth_buffer(
-					*m_device, m_dsv_heap->GetCPUDescriptorHandleForHeapStart(), get_extent(*m_swap_chain))},
-				m_vertices {},
-				m_indices {},
-				m_matrices {
-					DirectX::XMMatrixTranslation(0.0f, 0.0f, -0.9f),
-					DirectX::XMMatrixOrthographicLH(1.0f, 1.0f, 0.0f, 100.0f)},
-				m_matrix_buffer {
-					create_matrix_buffer(*m_device, m_cbv_srv_uav_heap->GetCPUDescriptorHandleForHeapStart())}
+				m_state {
+					*m_device,
+					*m_swap_chain,
+					m_dsv_heap->GetCPUDescriptorHandleForHeapStart(),
+					m_rtv_heap->GetCPUDescriptorHandleForHeapStart()}
 			{
 			}
 		};
@@ -600,6 +616,16 @@ namespace helium {
 		}
 	}
 }
+
+/*
+	I can identify four main complaints I have:
+	- d3d12_renderer is a *thicc* class
+	- record_commands is an oversized / over-specialized function
+	- there's a lot of duplicated code surrounding buffer creation
+	- upload buffer management is ad-hoc or non-existent
+	- Note that a lot of these resources can be easily grouped by usage
+	- Don't forget to never over-generalize
+*/
 
 int WinMain(HINSTANCE self, HINSTANCE, char*, int)
 {
