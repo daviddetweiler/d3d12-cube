@@ -101,6 +101,7 @@ namespace helium {
 			info.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
 			info.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
 			info.RasterizerState.DepthClipEnable = true;
+			info.RasterizerState.FrontCounterClockwise = true;
 			info.DepthStencilState.DepthEnable = true;
 			info.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
 			info.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
@@ -383,6 +384,9 @@ namespace helium {
 			D3D12_CPU_DESCRIPTOR_HANDLE dsv,
 			D3D12_GPU_DESCRIPTOR_HANDLE cbv_srv_uav_table,
 			ID3D12DescriptorHeap& cbv_heap,
+			const view_matrices& matrices,
+			ID3D12Resource& matrix_buffer,
+			ID3D12Resource& upload_buffer,
 			const vertex_buffer& vertices,
 			const index_buffer& indices)
 		{
@@ -398,6 +402,15 @@ namespace helium {
 			const auto heap_ptr = &cbv_heap;
 			command_list.SetDescriptorHeaps(1, &heap_ptr);
 			command_list.SetGraphicsRootDescriptorTable(0, cbv_srv_uav_table);
+
+			D3D12_RANGE range {};
+			void* data {};
+			winrt::check_hresult(upload_buffer.Map(0, &range, &data));
+			std::memcpy(data, &matrices, sizeof(matrices));
+			upload_buffer.Unmap(0, &range);
+
+			// FIXME: we don't check that the upload buffer is big enough
+			command_list.CopyBufferRegion(&matrix_buffer, 0, &upload_buffer, 0, sizeof(matrices));
 
 			std::array barriers {transition(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
 			command_list.ResourceBarrier(gsl::narrow_cast<UINT>(barriers.size()), barriers.data());
@@ -497,6 +510,8 @@ namespace helium {
 				const auto cbvs = m_cbv_srv_uav_heap->GetGPUDescriptorHandleForHeapStart();
 
 				winrt::check_hresult(allocator.Reset());
+
+				// FIXME: This thing is really, really oversized / hyper-specialized
 				record_commands(
 					list,
 					allocator,
@@ -507,6 +522,9 @@ namespace helium {
 					dsv,
 					cbvs,
 					*m_cbv_srv_uav_heap,
+					m_matrices,
+					*m_matrix_buffer,
+					*m_upload_buffer,
 					m_vertices,
 					m_indices);
 
@@ -521,6 +539,7 @@ namespace helium {
 			const winrt::com_ptr<ID3D12DescriptorHeap> m_rtv_heap {};
 			const winrt::com_ptr<ID3D12DescriptorHeap> m_dsv_heap {};
 			const winrt::com_ptr<ID3D12DescriptorHeap> m_cbv_srv_uav_heap {};
+			const winrt::com_ptr<ID3D12Resource> m_upload_buffer {};
 			gpu_fence m_fence;
 
 			const winrt::com_ptr<ID3D12RootSignature> m_root_signature {};
@@ -549,6 +568,9 @@ namespace helium {
 				m_dsv_heap {create_descriptor_heap(*m_device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1)},
 				m_cbv_srv_uav_heap {create_descriptor_heap(
 					*m_device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)},
+				m_upload_buffer {create_upload_buffer(
+					*m_device,
+					sizeof(view_matrices))}, // FIXME: a horrid hack, we should only have one upload ringbuffer
 				m_fence {*m_device},
 				m_root_signature {create_root_signature(*m_device)},
 				m_pipeline {create_default_pipeline_state(*m_device, *m_root_signature)},
@@ -561,7 +583,7 @@ namespace helium {
 				m_vertices {},
 				m_indices {},
 				m_matrices {
-					DirectX::XMMatrixTranslation(0.0f, 0.0f, 0.5f),
+					DirectX::XMMatrixTranslation(0.0f, 0.0f, -0.9f),
 					DirectX::XMMatrixOrthographicLH(1.0f, 1.0f, 0.0f, 100.0f)},
 				m_matrix_buffer {
 					create_matrix_buffer(*m_device, m_cbv_srv_uav_heap->GetCPUDescriptorHandleForHeapStart())}
