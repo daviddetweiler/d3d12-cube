@@ -11,6 +11,7 @@
 
 #include <winrt/base.h>
 
+#include <DirectXMath.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
@@ -314,6 +315,46 @@ namespace helium {
 			return {std::move(buffer), view};
 		}
 
+		struct view_matrices {
+			DirectX::XMMATRIX view;
+			DirectX::XMMATRIX projection;
+			std::uint8_t padding[128];
+		};
+
+		static_assert(sizeof(view_matrices) >= 256);
+
+		winrt::com_ptr<ID3D12Resource> create_matrix_buffer(ID3D12Device& device, D3D12_CPU_DESCRIPTOR_HANDLE cbv)
+		{
+			D3D12_HEAP_PROPERTIES heap {};
+			heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+			D3D12_RESOURCE_DESC info {};
+			info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+			info.Width = sizeof(view_matrices);
+			info.Height = 1;
+			info.DepthOrArraySize = 1;
+			info.MipLevels = 1;
+			info.Format = DXGI_FORMAT_UNKNOWN;
+			info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+			info.SampleDesc.Count = 1;
+
+			const auto buffer = winrt::capture<ID3D12Resource>(
+				&device,
+				&ID3D12Device::CreateCommittedResource,
+				&heap,
+				D3D12_HEAP_FLAG_NONE,
+				&info,
+				D3D12_RESOURCE_STATE_COPY_DEST,
+				nullptr);
+
+			D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_info {};
+			cbv_info.BufferLocation = buffer->GetGPUVirtualAddress();
+			cbv_info.SizeInBytes = gsl::narrow<UINT>(info.Width);
+			device.CreateConstantBufferView(&cbv_info, cbv);
+
+			return buffer;
+		}
+
 		void record_commands(
 			ID3D12GraphicsCommandList& command_list,
 			ID3D12CommandAllocator& allocator,
@@ -422,20 +463,16 @@ namespace helium {
 				const auto index = m_swap_chain->GetCurrentBackBufferIndex();
 				auto& allocator = *m_allocators.at(index);
 				auto& list = *m_command_lists.at(index);
+				auto& buffer = *get_buffer(*m_swap_chain, index);
+				const auto dsv = m_dsv_heap->GetCPUDescriptorHandleForHeapStart();
+				const auto rtv = offset(
+					m_rtv_heap->GetCPUDescriptorHandleForHeapStart(),
+					m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV),
+					index);
+
 				winrt::check_hresult(allocator.Reset());
 				record_commands(
-					list,
-					allocator,
-					*m_pipeline,
-					*m_root_signature,
-					*get_buffer(*m_swap_chain, index),
-					offset(
-						m_rtv_heap->GetCPUDescriptorHandleForHeapStart(),
-						m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV),
-						index),
-					m_dsv_heap->GetCPUDescriptorHandleForHeapStart(),
-					m_vertices,
-					m_indices);
+					list, allocator, *m_pipeline, *m_root_signature, buffer, rtv, dsv, m_vertices, m_indices);
 
 				execute(*m_queue, list);
 				winrt::check_hresult(m_swap_chain->Present(1, 0));
@@ -447,6 +484,7 @@ namespace helium {
 			const winrt::com_ptr<ID3D12CommandQueue> m_queue {};
 			const winrt::com_ptr<ID3D12DescriptorHeap> m_rtv_heap {};
 			const winrt::com_ptr<ID3D12DescriptorHeap> m_dsv_heap {};
+			const winrt::com_ptr<ID3D12DescriptorHeap> m_cbv_srv_uav_heap {};
 			gpu_fence m_fence;
 
 			const winrt::com_ptr<ID3D12RootSignature> m_root_signature {};
@@ -460,16 +498,20 @@ namespace helium {
 			vertex_buffer m_vertices {};
 			index_buffer m_indices {};
 
+			view_matrices m_matrices {};
+			const winrt::com_ptr<ID3D12Resource> m_matrix_buffer {};
+
 			d3d12_renderer(IDXGIFactory6& factory, HWND window, bool enable_debugging) :
-				m_device {[enable_debugging, &factory] {
+				m_device {[](auto&& enable_debugging, auto&& factory) {
 					if (enable_debugging)
 						winrt::capture<ID3D12Debug>(D3D12GetDebugInterface)->EnableDebugLayer();
 
 					return create_device(factory);
-				}()},
+				}(enable_debugging, factory)},
 				m_queue {create_command_queue(*m_device)},
 				m_rtv_heap {create_descriptor_heap(*m_device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2)},
 				m_dsv_heap {create_descriptor_heap(*m_device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1)},
+				m_cbv_srv_uav_heap {create_descriptor_heap(*m_device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1)},
 				m_fence {*m_device},
 				m_root_signature {create_root_signature(*m_device)},
 				m_pipeline {create_default_pipeline_state(*m_device, *m_root_signature)},
@@ -478,7 +520,14 @@ namespace helium {
 				m_swap_chain {attach_swap_chain(
 					factory, *m_device, window, *m_queue, m_rtv_heap->GetCPUDescriptorHandleForHeapStart())},
 				m_depth_buffer {create_depth_buffer(
-					*m_device, m_dsv_heap->GetCPUDescriptorHandleForHeapStart(), get_extent(*m_swap_chain))}
+					*m_device, m_dsv_heap->GetCPUDescriptorHandleForHeapStart(), get_extent(*m_swap_chain))},
+				m_vertices {},
+				m_indices {},
+				m_matrices {
+					DirectX::XMMatrixTranslation(0.0f, 0.0f, 0.5f),
+					DirectX::XMMatrixOrthographicLH(1.0f, 1.0f, 0.0f, 100.0f)},
+				m_matrix_buffer {
+					create_matrix_buffer(*m_device, m_cbv_srv_uav_heap->GetCPUDescriptorHandleForHeapStart())}
 			{
 			}
 		};
