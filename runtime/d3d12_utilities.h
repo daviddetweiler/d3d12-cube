@@ -85,6 +85,7 @@ namespace helium {
 				winrt::check_bool(WaitForSingleObject(m_event.get(), INFINITE) == WAIT_OBJECT_0);
 			}
 		}
+
 	private:
 		std::uint64_t m_value {};
 		const winrt::com_ptr<ID3D12Fence> m_fence {};
@@ -96,6 +97,72 @@ namespace helium {
 	{
 		const std::array<ID3D12CommandList*, sizeof...(lists)> list_array {(&lists, ...)};
 		queue.ExecuteCommandLists(gsl::narrow_cast<unsigned int>(list_array.size()), list_array.data());
+	}
+
+	auto create_buffer(ID3D12Device& device, std::size_t size, bool is_shader_visible = false)
+	{
+		D3D12_HEAP_PROPERTIES heap {};
+		heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+		D3D12_RESOURCE_DESC info {};
+		info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		info.Width = size;
+		info.Height = 1;
+		info.DepthOrArraySize = 1;
+		info.MipLevels = 1;
+		info.Format = DXGI_FORMAT_UNKNOWN;
+		info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+		info.SampleDesc.Count = 1;
+		info.Flags = is_shader_visible ? D3D12_RESOURCE_FLAG_NONE : D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+
+		return winrt::capture<ID3D12Resource>(
+			&device,
+			&ID3D12Device::CreateCommittedResource,
+			&heap,
+			D3D12_HEAP_FLAG_NONE,
+			&info,
+			D3D12_RESOURCE_STATE_COPY_DEST,
+			nullptr);
+	}
+
+	auto create_upload_buffer(ID3D12Device& device, std::size_t size)
+	{
+		D3D12_HEAP_PROPERTIES heap {};
+		heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+		D3D12_RESOURCE_DESC info {};
+		info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		info.Width = size;
+		info.Height = 1;
+		info.DepthOrArraySize = 1;
+		info.MipLevels = 1;
+		info.Format = DXGI_FORMAT_UNKNOWN;
+		info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+		info.SampleDesc.Count = 1;
+		info.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+
+		return winrt::capture<ID3D12Resource>(
+			&device,
+			&ID3D12Device::CreateCommittedResource,
+			&heap,
+			D3D12_HEAP_FLAG_NONE,
+			&info,
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr);
+	}
+
+	void* map(ID3D12Resource& resource)
+	{
+		D3D12_RANGE range {};
+		void* data {};
+		winrt::check_hresult(resource.Map(0, &range, &data));
+		return data;
+	}
+
+	void unmap(ID3D12Resource& resource)
+	{
+		D3D12_RANGE range {};
+		resource.Unmap(0, &range);
 	}
 }
 

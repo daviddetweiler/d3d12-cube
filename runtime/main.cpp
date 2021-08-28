@@ -233,33 +233,6 @@ namespace helium {
 			list.RSSetViewports(1, &viewport);
 		}
 
-		auto create_upload_buffer(ID3D12Device& device, std::uint64_t size_in_bytes)
-		{
-			// TODO: lots of opportunity to fold this resource-creation code
-			D3D12_HEAP_PROPERTIES heap {};
-			heap.Type = D3D12_HEAP_TYPE_UPLOAD;
-
-			D3D12_RESOURCE_DESC info {};
-			info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-			info.Width = size_in_bytes;
-			info.Height = 1;
-			info.DepthOrArraySize = 1;
-			info.MipLevels = 1;
-			info.Format = DXGI_FORMAT_UNKNOWN;
-			info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-			info.SampleDesc.Count = 1;
-			info.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
-
-			return winrt::capture<ID3D12Resource>(
-				&device,
-				&ID3D12Device::CreateCommittedResource,
-				&heap,
-				D3D12_HEAP_FLAG_NONE,
-				&info,
-				D3D12_RESOURCE_STATE_GENERIC_READ,
-				nullptr);
-		}
-
 		struct vertex_buffer {
 			winrt::com_ptr<ID3D12Resource> buffer;
 			D3D12_VERTEX_BUFFER_VIEW view;
@@ -273,67 +246,21 @@ namespace helium {
 
 		index_buffer create_index_buffer(ID3D12Device& device, unsigned int size)
 		{
-			D3D12_HEAP_PROPERTIES heap {};
-			heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-			D3D12_RESOURCE_DESC info {};
-			info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-			info.Width = size * sizeof(unsigned int);
-			info.Height = 1;
-			info.DepthOrArraySize = 1;
-			info.MipLevels = 1;
-			info.Format = DXGI_FORMAT_UNKNOWN;
-			info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-			info.SampleDesc.Count = 1;
-			info.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
-
-			auto buffer = winrt::capture<ID3D12Resource>(
-				&device,
-				&ID3D12Device::CreateCommittedResource,
-				&heap,
-				D3D12_HEAP_FLAG_NONE,
-				&info,
-				D3D12_RESOURCE_STATE_COPY_DEST,
-				nullptr);
-
+			auto buffer = create_buffer(device, size * sizeof(unsigned int));
 			D3D12_INDEX_BUFFER_VIEW view {};
 			view.BufferLocation = buffer->GetGPUVirtualAddress();
-			view.SizeInBytes = gsl::narrow_cast<UINT>(info.Width);
+			view.SizeInBytes = gsl::narrow_cast<UINT>(size * sizeof(unsigned int));
 			view.Format = DXGI_FORMAT_R32_UINT;
-
 			return {std::move(buffer), view, size};
 		}
 
 		vertex_buffer create_vertex_buffer(ID3D12Device& device, std::uint64_t size, std::uint64_t elem_size)
 		{
-			D3D12_HEAP_PROPERTIES heap {};
-			heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-			D3D12_RESOURCE_DESC info {};
-			info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-			info.Width = size * elem_size;
-			info.Height = 1;
-			info.DepthOrArraySize = 1;
-			info.MipLevels = 1;
-			info.Format = DXGI_FORMAT_UNKNOWN;
-			info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-			info.SampleDesc.Count = 1;
-			info.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
-
-			auto buffer = winrt::capture<ID3D12Resource>(
-				&device,
-				&ID3D12Device::CreateCommittedResource,
-				&heap,
-				D3D12_HEAP_FLAG_NONE,
-				&info,
-				D3D12_RESOURCE_STATE_COPY_DEST,
-				nullptr);
-
+			auto buffer = create_buffer(device, size * elem_size);
 			D3D12_VERTEX_BUFFER_VIEW view {};
 			view.BufferLocation = buffer->GetGPUVirtualAddress();
-			view.SizeInBytes = gsl::narrow_cast<UINT>(info.Width);
-			view.StrideInBytes = gsl::narrow_cast<UINT>(elem_size);
-
+			view.SizeInBytes = gsl::narrow<UINT>(size * elem_size);
+			view.StrideInBytes = gsl::narrow<UINT>(elem_size);
 			return {std::move(buffer), view};
 		}
 
@@ -386,18 +313,10 @@ namespace helium {
 			info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 			info.SampleDesc.Count = 1;
 
-			const auto buffer = winrt::capture<ID3D12Resource>(
-				&device,
-				&ID3D12Device::CreateCommittedResource,
-				&heap,
-				D3D12_HEAP_FLAG_NONE,
-				&info,
-				D3D12_RESOURCE_STATE_COPY_DEST,
-				nullptr);
-
+			const auto buffer = create_buffer(device, sizeof(view_matrices), true);
 			D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_info {};
 			cbv_info.BufferLocation = buffer->GetGPUVirtualAddress();
-			cbv_info.SizeInBytes = gsl::narrow<UINT>(info.Width);
+			cbv_info.SizeInBytes = gsl::narrow<UINT>(sizeof(view_matrices));
 			device.CreateConstantBufferView(&cbv_info, cbv);
 
 			return buffer;
@@ -432,17 +351,14 @@ namespace helium {
 			geometry.vertices = create_vertex_buffer(device, vertices.size(), sizeof(vector3));
 			geometry.indices = create_index_buffer(device, gsl::narrow<unsigned int>(indices.size()));
 
-			D3D12_RANGE range {};
-			void* data {};
-			winrt::check_hresult(upload_buffer->Map(0, &range, &data));
+			const auto data = map(*upload_buffer);
 			std::memcpy(data, indices.data(), indices.size() * sizeof(unsigned int));
 			std::memcpy(
 				std::next(static_cast<char*>(data), indices.size() * sizeof(unsigned int)),
 				vertices.data(),
 				vertices.size() * sizeof(vector3));
 
-			upload_buffer->Unmap(0, &range);
-
+			unmap(*upload_buffer);
 			winrt::check_hresult(allocator.Reset());
 			winrt::check_hresult(list.Reset(&allocator, nullptr));
 
@@ -455,6 +371,8 @@ namespace helium {
 				upload_buffer.get(),
 				indices.size() * sizeof(unsigned int),
 				vertices.size() * sizeof(vector3));
+
+			// TODO: check resource states for vertex, index, and view-matrix buffers
 
 			winrt::check_hresult(list.Close());
 			execute(queue, list);
@@ -513,11 +431,9 @@ namespace helium {
 			command_list.SetDescriptorHeaps(1, &heap_ptr);
 			command_list.SetGraphicsRootDescriptorTable(0, cbv_srv_uav_table);
 
-			D3D12_RANGE range {};
-			void* data {};
-			winrt::check_hresult(upload_buffer.Map(0, &range, &data));
+			const auto data = map(upload_buffer);
 			std::memcpy(data, &state.m_matrices, sizeof(state.m_matrices));
-			upload_buffer.Unmap(0, &range);
+			unmap(upload_buffer);
 
 			// FIXME: we don't check that the upload buffer is big enough
 			command_list.CopyBufferRegion(state.m_matrix_buffer.get(), 0, &upload_buffer, 0, sizeof(state.m_matrices));
