@@ -41,8 +41,11 @@ namespace helium {
 			}
 		}
 
-		auto create_device(IDXGIFactory6& factory)
+		auto create_device(IDXGIFactory6& factory, bool enable_debugging)
 		{
+			if (enable_debugging)
+				winrt::capture<ID3D12Debug>(D3D12GetDebugInterface)->EnableDebugLayer();
+
 			const auto adapter = winrt::capture<IDXGIAdapter>(
 				&factory, &IDXGIFactory6::EnumAdapterByGpuPreference, 0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE);
 
@@ -340,29 +343,33 @@ namespace helium {
 			std::uint8_t padding[128];
 		};
 
+		static_assert(sizeof(view_matrices) >= 256);
+
 		struct descriptor_heaps {
-			const winrt::com_ptr<ID3D12DescriptorHeap> m_rtv_heap {};
-			const winrt::com_ptr<ID3D12DescriptorHeap> m_dsv_heap {};
-			const winrt::com_ptr<ID3D12DescriptorHeap> m_cbv_srv_uav_heap {};
+			const winrt::com_ptr<ID3D12DescriptorHeap> rtv_heap {};
+			const winrt::com_ptr<ID3D12DescriptorHeap> dsv_heap {};
+			const winrt::com_ptr<ID3D12DescriptorHeap> cbv_srv_uav_heap {};
 			const D3D12_CPU_DESCRIPTOR_HANDLE rtv_base {};
 			const D3D12_CPU_DESCRIPTOR_HANDLE dsv_base {};
 			const D3D12_CPU_DESCRIPTOR_HANDLE csu_base {};
+			const D3D12_GPU_DESCRIPTOR_HANDLE csu_gpu_base {};
+			const UINT rtv_size {};
 
 			descriptor_heaps() = default;
 
 			descriptor_heaps(ID3D12Device& device) :
-				m_rtv_heap {create_descriptor_heap(device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2)},
-				m_dsv_heap {create_descriptor_heap(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1)},
-				m_cbv_srv_uav_heap {create_descriptor_heap(
+				rtv_heap {create_descriptor_heap(device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2)},
+				dsv_heap {create_descriptor_heap(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1)},
+				cbv_srv_uav_heap {create_descriptor_heap(
 					device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)},
-				rtv_base {m_rtv_heap->GetCPUDescriptorHandleForHeapStart()},
-				dsv_base {m_dsv_heap->GetCPUDescriptorHandleForHeapStart()},
-				csu_base {m_cbv_srv_uav_heap->GetCPUDescriptorHandleForHeapStart()}
+				rtv_base {rtv_heap->GetCPUDescriptorHandleForHeapStart()},
+				dsv_base {dsv_heap->GetCPUDescriptorHandleForHeapStart()},
+				csu_base {cbv_srv_uav_heap->GetCPUDescriptorHandleForHeapStart()},
+				csu_gpu_base {cbv_srv_uav_heap->GetGPUDescriptorHandleForHeapStart()},
+				rtv_size {device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV)}
 			{
 			}
 		};
-
-		static_assert(sizeof(view_matrices) >= 256);
 
 		winrt::com_ptr<ID3D12Resource> create_matrix_buffer(ID3D12Device& device, D3D12_CPU_DESCRIPTOR_HANDLE cbv)
 		{
@@ -397,11 +404,11 @@ namespace helium {
 		}
 
 		struct geometry_buffers {
-			vertex_buffer m_vertices {};
-			index_buffer m_indices {};
+			vertex_buffer vertices {};
+			index_buffer indices {};
 		};
 
-		geometry_buffers prepare_geometry_load(
+		geometry_buffers geometry_load(
 			ID3D12Device& device,
 			ID3D12GraphicsCommandList& list,
 			ID3D12CommandAllocator& allocator,
@@ -422,8 +429,8 @@ namespace helium {
 			const auto upload_buffer = create_upload_buffer(
 				device, indices.size() * sizeof(unsigned int) + vertices.size() * sizeof(vector3));
 
-			geometry.m_vertices = create_vertex_buffer(device, vertices.size(), sizeof(vector3));
-			geometry.m_indices = create_index_buffer(device, gsl::narrow<unsigned int>(indices.size()));
+			geometry.vertices = create_vertex_buffer(device, vertices.size(), sizeof(vector3));
+			geometry.indices = create_index_buffer(device, gsl::narrow<unsigned int>(indices.size()));
 
 			D3D12_RANGE range {};
 			void* data {};
@@ -440,10 +447,10 @@ namespace helium {
 			winrt::check_hresult(list.Reset(&allocator, nullptr));
 
 			list.CopyBufferRegion(
-				geometry.m_indices.buffer.get(), 0, upload_buffer.get(), 0, indices.size() * sizeof(unsigned int));
+				geometry.indices.buffer.get(), 0, upload_buffer.get(), 0, indices.size() * sizeof(unsigned int));
 
 			list.CopyBufferRegion(
-				geometry.m_vertices.buffer.get(),
+				geometry.vertices.buffer.get(),
 				0,
 				upload_buffer.get(),
 				indices.size() * sizeof(unsigned int),
@@ -497,12 +504,12 @@ namespace helium {
 
 			command_list.SetGraphicsRootSignature(&root_signature);
 			command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-			command_list.IASetVertexBuffers(0, 1, &state.geometry.m_vertices.view);
-			command_list.IASetIndexBuffer(&state.geometry.m_indices.view);
+			command_list.IASetVertexBuffers(0, 1, &state.geometry.vertices.view);
+			command_list.IASetIndexBuffer(&state.geometry.indices.view);
 			command_list.OMSetRenderTargets(1, &rtv, false, &dsv);
 			maximize_rasterizer(command_list, buffer);
 
-			const auto heap_ptr = heaps.m_cbv_srv_uav_heap.get();
+			const auto heap_ptr = heaps.cbv_srv_uav_heap.get();
 			command_list.SetDescriptorHeaps(1, &heap_ptr);
 			command_list.SetGraphicsRootDescriptorTable(0, cbv_srv_uav_table);
 
@@ -521,7 +528,7 @@ namespace helium {
 			std::array clear_color {0.0f, 0.0f, 0.0f, 1.0f};
 			command_list.ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 			command_list.ClearRenderTargetView(rtv, clear_color.data(), 0, nullptr);
-			command_list.DrawIndexedInstanced(state.geometry.m_indices.size, 1, 0, 0, 0);
+			command_list.DrawIndexedInstanced(state.geometry.indices.size, 1, 0, 0, 0);
 
 			reverse(barriers.at(0));
 			command_list.ResourceBarrier(gsl::narrow_cast<UINT>(barriers.size()), barriers.data());
@@ -541,7 +548,7 @@ namespace helium {
 				// Need to execute copy commands here
 				auto& list = *m_command_lists.front();
 				auto& allocator = *m_allocators.front();
-				m_state.geometry = prepare_geometry_load(*m_device, list, allocator, *m_queue, m_fence);
+				m_state.geometry = geometry_load(*m_device, list, allocator, *m_queue, m_fence);
 			}
 
 			d3d12_renderer(d3d12_renderer&) = delete;
@@ -561,15 +568,6 @@ namespace helium {
 				const auto index = m_swap_chain->GetCurrentBackBufferIndex();
 				auto& allocator = *m_allocators.at(index);
 				auto& list = *m_command_lists.at(index);
-				auto& buffer = *get_buffer(*m_swap_chain, index);
-				const auto dsv = m_heaps.dsv_base;
-				const auto rtv = offset(
-					m_heaps.rtv_base,
-					m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV),
-					index);
-
-				const auto cbvs = m_heaps.m_cbv_srv_uav_heap->GetGPUDescriptorHandleForHeapStart();
-
 				winrt::check_hresult(allocator.Reset());
 
 				// FIXME: This thing is really, really oversized / hyper-specialized
@@ -578,10 +576,10 @@ namespace helium {
 					allocator,
 					*m_pipeline,
 					*m_root_signature,
-					buffer,
-					rtv,
-					dsv,
-					cbvs,
+					*get_buffer(*m_swap_chain, index),
+					offset(m_heaps.rtv_base, m_heaps.rtv_size, index),
+					m_heaps.dsv_base,
+					m_heaps.csu_gpu_base,
 					m_heaps,
 					*m_upload_buffer,
 					m_state);
@@ -606,17 +604,11 @@ namespace helium {
 			const winrt::com_ptr<IDXGISwapChain3> m_swap_chain {};
 			render_state m_state {};
 
+			// FIXME: a horrid hack, we should only have one upload ringbuffer
 			d3d12_renderer(IDXGIFactory6& factory, HWND window, bool enable_debugging) :
-				m_device {[](auto&& enable_debugging, auto&& factory) {
-					if (enable_debugging)
-						winrt::capture<ID3D12Debug>(D3D12GetDebugInterface)->EnableDebugLayer();
-
-					return create_device(factory);
-				}(enable_debugging, factory)},
+				m_device {create_device(factory, enable_debugging)},
 				m_queue {create_command_queue(*m_device)},
-				m_upload_buffer {create_upload_buffer(
-					*m_device,
-					sizeof(view_matrices))}, // FIXME: a horrid hack, we should only have one upload ringbuffer
+				m_upload_buffer {create_upload_buffer(*m_device, sizeof(view_matrices))},
 				m_heaps {*m_device},
 				m_fence {*m_device},
 				m_root_signature {create_root_signature(*m_device)},
