@@ -269,7 +269,6 @@ namespace helium {
 			const winrt::com_ptr<ID3D12DescriptorHeap> dsv_heap {};
 			const D3D12_CPU_DESCRIPTOR_HANDLE rtv_base {};
 			const D3D12_CPU_DESCRIPTOR_HANDLE dsv_base {};
-			const UINT rtv_size {};
 
 			descriptor_heaps() = default;
 
@@ -277,42 +276,17 @@ namespace helium {
 				rtv_heap {create_descriptor_heap(device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2)},
 				dsv_heap {create_descriptor_heap(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1)},
 				rtv_base {rtv_heap->GetCPUDescriptorHandleForHeapStart()},
-				dsv_base {dsv_heap->GetCPUDescriptorHandleForHeapStart()},
-				rtv_size {device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV)}
+				dsv_base {dsv_heap->GetCPUDescriptorHandleForHeapStart()}
 			{
 			}
 		};
-
-		winrt::com_ptr<ID3D12Resource> create_matrix_buffer(ID3D12Device& device, D3D12_CPU_DESCRIPTOR_HANDLE cbv)
-		{
-			D3D12_HEAP_PROPERTIES heap {};
-			heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-			D3D12_RESOURCE_DESC info {};
-			info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-			info.Width = sizeof(view_matrices);
-			info.Height = 1;
-			info.DepthOrArraySize = 1;
-			info.MipLevels = 1;
-			info.Format = DXGI_FORMAT_UNKNOWN;
-			info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-			info.SampleDesc.Count = 1;
-
-			const auto buffer = create_buffer(device, sizeof(view_matrices), true);
-			D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_info {};
-			cbv_info.BufferLocation = buffer->GetGPUVirtualAddress();
-			cbv_info.SizeInBytes = gsl::narrow<UINT>(sizeof(view_matrices));
-			device.CreateConstantBufferView(&cbv_info, cbv);
-
-			return buffer;
-		}
 
 		struct geometry_buffers {
 			vertex_buffer vertices {};
 			index_buffer indices {};
 		};
 
-		geometry_buffers geometry_load(
+		geometry_buffers load_geometry(
 			ID3D12Device& device,
 			ID3D12GraphicsCommandList& list,
 			ID3D12CommandAllocator& allocator,
@@ -419,6 +393,30 @@ namespace helium {
 			winrt::check_hresult(command_list.Close());
 		}
 
+		struct per_frame_resource_table {
+			const winrt::com_ptr<ID3D12CommandAllocator> allocator {};
+			const winrt::com_ptr<ID3D12GraphicsCommandList> list {};
+			const winrt::com_ptr<ID3D12Resource> backbuffer {};
+			const D3D12_CPU_DESCRIPTOR_HANDLE rtv {};
+		};
+
+		std::array<per_frame_resource_table, 2>
+		create_frame_resources(ID3D12Device4& device, IDXGISwapChain& swap_chain, D3D12_CPU_DESCRIPTOR_HANDLE rtv_base)
+		{
+			const auto rtv_size = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+			return {
+				per_frame_resource_table {
+					create_command_allocator(device),
+					create_command_list(device),
+					get_buffer(swap_chain, 0),
+					offset(rtv_base, rtv_size, 0)},
+				per_frame_resource_table {
+					create_command_allocator(device),
+					create_command_list(device),
+					get_buffer(swap_chain, 1),
+					offset(rtv_base, rtv_size, 1)}};
+		}
+
 		class d3d12_renderer {
 		public:
 			d3d12_renderer(HWND window, bool enable_debugging) :
@@ -429,9 +427,8 @@ namespace helium {
 					enable_debugging}
 			{
 				// Need to execute copy commands here
-				auto& list = *m_command_lists.front();
-				auto& allocator = *m_allocators.front();
-				m_state.geometry = geometry_load(*m_device, list, allocator, *m_queue, m_fence);
+				auto& frame = m_frame_resources.front();
+				m_state.geometry = load_geometry(*m_device, *frame.list, *frame.allocator, *m_queue, m_fence);
 			}
 
 			d3d12_renderer(d3d12_renderer&) = delete;
@@ -449,22 +446,21 @@ namespace helium {
 			{
 				m_fence.block(1);
 				const auto index = m_swap_chain->GetCurrentBackBufferIndex();
-				auto& allocator = *m_allocators.at(index);
-				auto& list = *m_command_lists.at(index);
-				winrt::check_hresult(allocator.Reset());
+				auto& frame = m_frame_resources.front();
+				winrt::check_hresult(frame.allocator->Reset());
 
 				// FIXME: This thing is really, really oversized / hyper-specialized
 				record_commands(
-					list,
-					allocator,
+					*frame.list,
+					*frame.allocator,
 					*m_pipeline,
 					*m_root_signature,
-					*get_buffer(*m_swap_chain, index),
-					offset(m_heaps.rtv_base, m_heaps.rtv_size, index),
+					*frame.backbuffer,
+					frame.rtv,
 					m_heaps.dsv_base,
 					m_state);
 
-				execute(*m_queue, list);
+				execute(*m_queue, *frame.list);
 				winrt::check_hresult(m_swap_chain->Present(1, 0));
 				m_fence.bump(*m_queue);
 			}
@@ -478,8 +474,7 @@ namespace helium {
 
 			const winrt::com_ptr<ID3D12RootSignature> m_root_signature {};
 			const winrt::com_ptr<ID3D12PipelineState> m_pipeline {};
-			const std::array<winrt::com_ptr<ID3D12CommandAllocator>, 2> m_allocators {};
-			const std::array<winrt::com_ptr<ID3D12GraphicsCommandList>, 2> m_command_lists {};
+			const std::array<per_frame_resource_table, 2> m_frame_resources {};
 
 			const winrt::com_ptr<IDXGISwapChain3> m_swap_chain {};
 			render_state m_state {};
@@ -493,8 +488,7 @@ namespace helium {
 				m_fence {*m_device},
 				m_root_signature {create_root_signature(*m_device)},
 				m_pipeline {create_default_pipeline_state(*m_device, *m_root_signature)},
-				m_allocators {create_command_allocator(*m_device), create_command_allocator(*m_device)},
-				m_command_lists {create_command_list(*m_device), create_command_list(*m_device)},
+				m_frame_resources {create_frame_resources(*m_device, *m_swap_chain, m_heaps.rtv_base)},
 				m_swap_chain {attach_swap_chain(factory, *m_device, window, *m_queue, m_heaps.rtv_base)},
 				m_state {*m_device, *m_swap_chain, m_heaps.dsv_base}
 			{
