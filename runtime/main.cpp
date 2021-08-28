@@ -343,7 +343,7 @@ namespace helium {
 
 		struct render_state {
 			const winrt::com_ptr<ID3D12Resource> m_depth_buffer {};
-			geometry_buffers geometry;
+			geometry_buffers geometry {};
 			view_matrices m_matrices {};
 
 			render_state() = default;
@@ -358,41 +358,6 @@ namespace helium {
 			}
 		};
 
-		void record_commands(
-			ID3D12GraphicsCommandList& command_list,
-			ID3D12CommandAllocator& allocator,
-			ID3D12PipelineState& pipeline_state,
-			ID3D12RootSignature& root_signature,
-			ID3D12Resource& buffer,
-			D3D12_CPU_DESCRIPTOR_HANDLE rtv,
-			D3D12_CPU_DESCRIPTOR_HANDLE dsv,
-			const render_state& state)
-		{
-			winrt::check_hresult(command_list.Reset(&allocator, &pipeline_state));
-
-			command_list.SetGraphicsRootSignature(&root_signature);
-			command_list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-			command_list.IASetVertexBuffers(0, 1, &state.geometry.vertices.view);
-			command_list.IASetIndexBuffer(&state.geometry.indices.view);
-			command_list.OMSetRenderTargets(1, &rtv, false, &dsv);
-			maximize_rasterizer(command_list, buffer);
-
-			command_list.SetGraphicsRoot32BitConstants(0, 4 * 4 * 2, &state.m_matrices, 0);
-
-			std::array barriers {transition(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
-			command_list.ResourceBarrier(gsl::narrow_cast<UINT>(barriers.size()), barriers.data());
-
-			std::array clear_color {0.0f, 0.0f, 0.0f, 1.0f};
-			command_list.ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-			command_list.ClearRenderTargetView(rtv, clear_color.data(), 0, nullptr);
-			command_list.DrawIndexedInstanced(state.geometry.indices.size, 1, 0, 0, 0);
-
-			reverse(barriers.at(0));
-			command_list.ResourceBarrier(gsl::narrow_cast<UINT>(barriers.size()), barriers.data());
-
-			winrt::check_hresult(command_list.Close());
-		}
-
 		struct per_frame_resource_table {
 			const winrt::com_ptr<ID3D12CommandAllocator> allocator {};
 			const winrt::com_ptr<ID3D12GraphicsCommandList> list {};
@@ -400,11 +365,45 @@ namespace helium {
 			const D3D12_CPU_DESCRIPTOR_HANDLE rtv {};
 		};
 
-		std::array<per_frame_resource_table, 2>
+		void record_commands(
+			const per_frame_resource_table& frame,
+			ID3D12PipelineState& pipeline_state,
+			ID3D12RootSignature& root_signature,
+			D3D12_CPU_DESCRIPTOR_HANDLE dsv,
+			const render_state& state)
+		{
+			winrt::check_hresult(frame.list->Reset(frame.allocator.get(), &pipeline_state));
+
+			frame.list->SetGraphicsRootSignature(&root_signature);
+			frame.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			frame.list->IASetVertexBuffers(0, 1, &state.geometry.vertices.view);
+			frame.list->IASetIndexBuffer(&state.geometry.indices.view);
+			frame.list->OMSetRenderTargets(1, &frame.rtv, false, &dsv);
+			maximize_rasterizer(*frame.list, *frame.backbuffer);
+
+			frame.list->SetGraphicsRoot32BitConstants(0, 4 * 4 * 2, &state.m_matrices, 0);
+
+			std::array barriers {
+				transition(*frame.backbuffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
+
+			frame.list->ResourceBarrier(gsl::narrow_cast<UINT>(barriers.size()), barriers.data());
+
+			std::array clear_color {0.0f, 0.0f, 0.0f, 1.0f};
+			frame.list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+			frame.list->ClearRenderTargetView(frame.rtv, clear_color.data(), 0, nullptr);
+			frame.list->DrawIndexedInstanced(state.geometry.indices.size, 1, 0, 0, 0);
+
+			reverse(barriers.front());
+			frame.list->ResourceBarrier(gsl::narrow_cast<UINT>(barriers.size()), barriers.data());
+
+			winrt::check_hresult(frame.list->Close());
+		}
+
+		auto
 		create_frame_resources(ID3D12Device4& device, IDXGISwapChain& swap_chain, D3D12_CPU_DESCRIPTOR_HANDLE rtv_base)
 		{
 			const auto rtv_size = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-			return {
+			return std::array {
 				per_frame_resource_table {
 					create_command_allocator(device),
 					create_command_list(device),
@@ -446,19 +445,11 @@ namespace helium {
 			{
 				m_fence.block(1);
 				const auto index = m_swap_chain->GetCurrentBackBufferIndex();
-				auto& frame = m_frame_resources.front();
+				auto& frame = m_frame_resources.at(index);
 				winrt::check_hresult(frame.allocator->Reset());
 
 				// FIXME: This thing is really, really oversized / hyper-specialized
-				record_commands(
-					*frame.list,
-					*frame.allocator,
-					*m_pipeline,
-					*m_root_signature,
-					*frame.backbuffer,
-					frame.rtv,
-					m_heaps.dsv_base,
-					m_state);
+				record_commands(frame, *m_pipeline, *m_root_signature, m_heaps.dsv_base, m_state);
 
 				execute(*m_queue, *frame.list);
 				winrt::check_hresult(m_swap_chain->Present(1, 0));
@@ -474,9 +465,9 @@ namespace helium {
 
 			const winrt::com_ptr<ID3D12RootSignature> m_root_signature {};
 			const winrt::com_ptr<ID3D12PipelineState> m_pipeline {};
+			const winrt::com_ptr<IDXGISwapChain3> m_swap_chain {};
 			const std::array<per_frame_resource_table, 2> m_frame_resources {};
 
-			const winrt::com_ptr<IDXGISwapChain3> m_swap_chain {};
 			render_state m_state {};
 
 			// FIXME: a horrid hack, we should only have one upload ringbuffer
@@ -488,8 +479,8 @@ namespace helium {
 				m_fence {*m_device},
 				m_root_signature {create_root_signature(*m_device)},
 				m_pipeline {create_default_pipeline_state(*m_device, *m_root_signature)},
-				m_frame_resources {create_frame_resources(*m_device, *m_swap_chain, m_heaps.rtv_base)},
 				m_swap_chain {attach_swap_chain(factory, *m_device, window, *m_queue, m_heaps.rtv_base)},
+				m_frame_resources {create_frame_resources(*m_device, *m_swap_chain, m_heaps.rtv_base)},
 				m_state {*m_device, *m_swap_chain, m_heaps.dsv_base}
 			{
 			}
