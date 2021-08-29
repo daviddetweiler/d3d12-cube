@@ -164,6 +164,11 @@ namespace helium {
 		D3D12_RANGE range {};
 		resource.Unmap(0, &range);
 	}
+
+	void barrier(ID3D12GraphicsCommandList& list, gsl::span<const D3D12_RESOURCE_BARRIER> barriers)
+	{
+		list.ResourceBarrier(gsl::narrow<UINT>(barriers.size()), barriers.data());
+	}
 }
 
 #endif

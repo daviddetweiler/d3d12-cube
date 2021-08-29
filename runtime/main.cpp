@@ -140,6 +140,7 @@ namespace helium {
 			winrt::com_ptr<ID3DBlob> error {};
 			winrt::check_hresult(
 				D3D12SerializeRootSignature(&info, D3D_ROOT_SIGNATURE_VERSION_1, result.put(), error.put()));
+
 			return winrt::capture<ID3D12RootSignature>(
 				&device, &ID3D12Device::CreateRootSignature, 0, result->GetBufferPointer(), result->GetBufferSize());
 		}
@@ -342,21 +343,22 @@ namespace helium {
 		}
 
 		struct render_state {
-			const winrt::com_ptr<ID3D12Resource> m_depth_buffer {};
+			const winrt::com_ptr<ID3D12Resource> depth_buffer {};
+			const D3D12_CPU_DESCRIPTOR_HANDLE dsv {};
 			geometry_buffers geometry {};
-			view_matrices m_matrices {};
-
-			render_state() = default;
-
-			render_state(ID3D12Device& device, IDXGISwapChain1& swap_chain, D3D12_CPU_DESCRIPTOR_HANDLE dsv) :
-				m_depth_buffer {create_depth_buffer(device, dsv, get_extent(swap_chain))},
-				geometry {},
-				m_matrices {
-					DirectX::XMMatrixTranslation(0.0f, 0.0f, -0.9f),
-					DirectX::XMMatrixOrthographicLH(1.0f, 1.0f, 0.0f, 100.0f)}
-			{
-			}
+			view_matrices matrices {};
 		};
+
+		render_state
+		create_render_state(ID3D12Device& device, IDXGISwapChain1& swap_chain, D3D12_CPU_DESCRIPTOR_HANDLE dsv)
+		{
+			return {
+				create_depth_buffer(device, dsv, get_extent(swap_chain)),
+				dsv,
+				{},
+				{DirectX::XMMatrixTranslation(0.0f, 0.0f, -0.9f),
+				 DirectX::XMMatrixOrthographicLH(1.0f, 1.0f, 0.0f, 100.0f)}};
+		}
 
 		struct per_frame_resource_table {
 			const winrt::com_ptr<ID3D12CommandAllocator> allocator {};
@@ -367,34 +369,32 @@ namespace helium {
 
 		void record_commands(
 			const per_frame_resource_table& frame,
-			ID3D12PipelineState& pipeline_state,
+			const render_state& state,
 			ID3D12RootSignature& root_signature,
-			D3D12_CPU_DESCRIPTOR_HANDLE dsv,
-			const render_state& state)
+			ID3D12PipelineState& pipeline_state)
 		{
 			winrt::check_hresult(frame.list->Reset(frame.allocator.get(), &pipeline_state));
 
 			frame.list->SetGraphicsRootSignature(&root_signature);
+			frame.list->SetGraphicsRoot32BitConstants(0, 4 * 4 * 2, &state.matrices, 0);
 			frame.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 			frame.list->IASetVertexBuffers(0, 1, &state.geometry.vertices.view);
 			frame.list->IASetIndexBuffer(&state.geometry.indices.view);
-			frame.list->OMSetRenderTargets(1, &frame.rtv, false, &dsv);
+			frame.list->OMSetRenderTargets(1, &frame.rtv, false, &state.dsv);
 			maximize_rasterizer(*frame.list, *frame.backbuffer);
-
-			frame.list->SetGraphicsRoot32BitConstants(0, 4 * 4 * 2, &state.m_matrices, 0);
 
 			std::array barriers {
 				transition(*frame.backbuffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)};
 
-			frame.list->ResourceBarrier(gsl::narrow_cast<UINT>(barriers.size()), barriers.data());
+			barrier(*frame.list, barriers);
 
 			std::array clear_color {0.0f, 0.0f, 0.0f, 1.0f};
-			frame.list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+			frame.list->ClearDepthStencilView(state.dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 			frame.list->ClearRenderTargetView(frame.rtv, clear_color.data(), 0, nullptr);
 			frame.list->DrawIndexedInstanced(state.geometry.indices.size, 1, 0, 0, 0);
 
 			reverse(barriers.front());
-			frame.list->ResourceBarrier(gsl::narrow_cast<UINT>(barriers.size()), barriers.data());
+			barrier(*frame.list, barriers);
 
 			winrt::check_hresult(frame.list->Close());
 		}
@@ -449,7 +449,7 @@ namespace helium {
 				winrt::check_hresult(frame.allocator->Reset());
 
 				// FIXME: This thing is really, really oversized / hyper-specialized
-				record_commands(frame, *m_pipeline, *m_root_signature, m_heaps.dsv_base, m_state);
+				record_commands(frame, m_state, *m_root_signature, *m_pipeline);
 
 				execute(*m_queue, *frame.list);
 				winrt::check_hresult(m_swap_chain->Present(1, 0));
@@ -481,7 +481,7 @@ namespace helium {
 				m_pipeline {create_default_pipeline_state(*m_device, *m_root_signature)},
 				m_swap_chain {attach_swap_chain(factory, *m_device, window, *m_queue, m_heaps.rtv_base)},
 				m_frame_resources {create_frame_resources(*m_device, *m_swap_chain, m_heaps.rtv_base)},
-				m_state {*m_device, *m_swap_chain, m_heaps.dsv_base}
+				m_state {create_render_state(*m_device, *m_swap_chain, m_heaps.dsv_base)}
 			{
 			}
 		};
