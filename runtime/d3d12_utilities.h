@@ -38,12 +38,6 @@ namespace helium {
 		return {handle.ptr + index * size};
 	}
 
-	constexpr D3D12_CPU_DESCRIPTOR_HANDLE
-	offset(D3D12_GPU_DESCRIPTOR_HANDLE handle, std::size_t size, std::size_t index)
-	{
-		return {handle.ptr + index * size};
-	}
-
 	auto get_buffer(IDXGISwapChain& swap_chain, unsigned int index)
 	{
 		return winrt::capture<ID3D12Resource>(&swap_chain, &IDXGISwapChain::GetBuffer, index);
@@ -99,7 +93,7 @@ namespace helium {
 		queue.ExecuteCommandLists(gsl::narrow_cast<unsigned int>(list_array.size()), list_array.data());
 	}
 
-	auto create_buffer(ID3D12Device& device, std::size_t size, bool is_shader_visible = false)
+	auto create_buffer(ID3D12Device& device, std::size_t size)
 	{
 		D3D12_HEAP_PROPERTIES heap {};
 		heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -113,7 +107,7 @@ namespace helium {
 		info.Format = DXGI_FORMAT_UNKNOWN;
 		info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 		info.SampleDesc.Count = 1;
-		info.Flags = is_shader_visible ? D3D12_RESOURCE_FLAG_NONE : D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+		info.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
 
 		return winrt::capture<ID3D12Resource>(
 			&device,

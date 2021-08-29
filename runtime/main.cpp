@@ -459,22 +459,20 @@ namespace helium {
 		private:
 			const winrt::com_ptr<ID3D12Device4> m_device {};
 			const winrt::com_ptr<ID3D12CommandQueue> m_queue {};
-			const winrt::com_ptr<ID3D12Resource> m_upload_buffer {};
 			const descriptor_heaps m_heaps {};
 			gpu_fence m_fence;
 
 			const winrt::com_ptr<ID3D12RootSignature> m_root_signature {};
 			const winrt::com_ptr<ID3D12PipelineState> m_pipeline {};
 			const winrt::com_ptr<IDXGISwapChain3> m_swap_chain {};
-			const std::array<per_frame_resource_table, 2> m_frame_resources {};
 
+			const std::array<per_frame_resource_table, 2> m_frame_resources {};
 			render_state m_state {};
 
 			// FIXME: a horrid hack, we should only have one upload ringbuffer
 			d3d12_renderer(IDXGIFactory6& factory, HWND window, bool enable_debugging) :
 				m_device {create_device(factory, enable_debugging)},
 				m_queue {create_command_queue(*m_device)},
-				m_upload_buffer {create_upload_buffer(*m_device, sizeof(view_matrices))},
 				m_heaps {*m_device},
 				m_fence {*m_device},
 				m_root_signature {create_root_signature(*m_device)},
