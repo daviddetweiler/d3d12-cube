@@ -76,5 +76,5 @@ helium::wavefront helium::load_wavefront(gsl::czstring<> name)
 		}
 	}
 
-	return {std::move(positions), std::move(faces)};
+	return {.positions {std::move(positions)}, .faces {std::move(faces)}};
 }
