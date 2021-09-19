@@ -112,7 +112,8 @@ namespace helium {
 			info.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
 			info.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 			info.NumRenderTargets = 1;
-			info.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+			info.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+			//_SRGB;
 			info.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 			info.SampleDesc.Count = 1;
 
@@ -204,7 +205,8 @@ namespace helium {
 			for (gsl::index i {}; i < 2; ++i) {
 				D3D12_RENDER_TARGET_VIEW_DESC rtv_info {};
 				rtv_info.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-				rtv_info.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+				rtv_info.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+				//_SRGB;
 				device.CreateRenderTargetView(
 					get_buffer(*swap_chain, gsl::narrow_cast<unsigned int>(i)).get(),
 					&rtv_info,
@@ -359,7 +361,7 @@ namespace helium {
 				.dsv {dsv},
 				.geometry {},
 				.matrices {
-					.view {DirectX::XMMatrixTranslation(0.0f, 0.0f, 0.9f)},
+					.view {DirectX::XMMatrixTranslation(0.0f, 0.0f, -0.7f)},
 					.projection {DirectX::XMMatrixIdentity()}}};
 		}
 

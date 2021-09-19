@@ -18,8 +18,9 @@ vertex_out main(uint id : SV_VertexID, float3 position : POSITION)
 	};
 
 	vertex_out vertex;
-	vertex.position = mul(view, float4(position, 1.0));
+	vertex.position = mul(float4(position, 1.0), view);
 	vertex.color = colors[id % 3];
+	vertex.color = vertex.position.zzz;
 	
 	return vertex;
 }
