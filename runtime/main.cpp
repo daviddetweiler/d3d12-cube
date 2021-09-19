@@ -359,8 +359,8 @@ namespace helium {
 				.dsv {dsv},
 				.geometry {},
 				.matrices {
-					.view {DirectX::XMMatrixTranslation(0.0f, 0.0f, -0.9f)},
-					.projection {DirectX::XMMatrixOrthographicLH(1.0f, 1.0f, 0.0f, 100.0f)}}};
+					.view {DirectX::XMMatrixTranslation(0.0f, 0.0f, 0.9f)},
+					.projection {DirectX::XMMatrixIdentity()}}};
 		}
 
 		struct per_frame_resource_table {
