@@ -361,7 +361,7 @@ namespace helium {
 				dsv,
 				{},
 				{DirectX::XMMatrixTranslation(0.0f, 0.0f, 50.0f),
-				 DirectX::XMMatrixOrthographicLH(4.0f * aspect, 4.0f, 0.0f, 100.0f)}};
+				 DirectX::XMMatrixPerspectiveFovLH(3.141f / 2.0f, aspect, 0.01f, 100.0f)}};
 		}
 
 		struct per_frame_resource_table {
@@ -502,7 +502,7 @@ namespace helium {
 				// Does the renderer always need to have the view matrix built in? It will be animated often
 				renderer.view() = DirectX::XMMatrixMultiply(
 					DirectX::XMMatrixRotationRollPitchYaw(angle, 0.0f, angle),
-					DirectX::XMMatrixTranslation(0.0f, 0.0f, 50.0f));
+					DirectX::XMMatrixTranslation(0.0f, 0.0f, 3.0f));
 
 				++frame;
 			}
