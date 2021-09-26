@@ -16,6 +16,8 @@
 #include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
 
+#include <DirectXMath.h>
+
 #include "d3d12_utilities.h"
 #include "shader_loading.h"
 #include "wavefront_loader.h"
@@ -247,7 +249,7 @@ namespace helium {
 			view.BufferLocation = buffer->GetGPUVirtualAddress();
 			view.SizeInBytes = gsl::narrow_cast<UINT>(size * sizeof(unsigned int));
 			view.Format = DXGI_FORMAT_R32_UINT;
-			return {std::move(buffer), view, size};
+			return {.buffer {std::move(buffer)}, .view {view}, .size {size}};
 		}
 
 		vertex_buffer create_vertex_buffer(ID3D12Device& device, std::uint64_t size, std::uint64_t elem_size)
@@ -257,7 +259,7 @@ namespace helium {
 			view.BufferLocation = buffer->GetGPUVirtualAddress();
 			view.SizeInBytes = gsl::narrow<UINT>(size * elem_size);
 			view.StrideInBytes = gsl::narrow<UINT>(elem_size);
-			return {std::move(buffer), view};
+			return {.buffer {std::move(buffer)}, .view {view}};
 		}
 
 		struct view_matrices {
