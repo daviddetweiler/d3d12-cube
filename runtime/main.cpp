@@ -104,7 +104,7 @@ namespace helium {
 			info.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
 			info.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
 			info.RasterizerState.DepthClipEnable = true;
-			info.RasterizerState.FrontCounterClockwise = true;
+			info.RasterizerState.FrontCounterClockwise = false;
 			info.DepthStencilState.DepthEnable = true;
 			info.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
 			info.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
@@ -352,12 +352,14 @@ namespace helium {
 		render_state
 		create_render_state(ID3D12Device& device, IDXGISwapChain1& swap_chain, D3D12_CPU_DESCRIPTOR_HANDLE dsv)
 		{
+			const auto extent = get_extent(swap_chain);
+			const auto aspect = gsl::narrow<float>(extent.width) / extent.height;
 			return {
 				create_depth_buffer(device, dsv, get_extent(swap_chain)),
 				dsv,
 				{},
-				{DirectX::XMMatrixTranslation(0.0f, 0.0f, -0.9f),
-				 DirectX::XMMatrixOrthographicLH(1.0f, 1.0f, 0.0f, 100.0f)}};
+				{DirectX::XMMatrixTranslation(0.0f, 0.0f, 50.0f),
+				 DirectX::XMMatrixOrthographicLH(4.0f * aspect, 4.0f, 0.0f, 100.0f)}};
 		}
 
 		struct per_frame_resource_table {
