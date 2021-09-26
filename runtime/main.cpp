@@ -460,6 +460,8 @@ namespace helium {
 				m_fence.bump(*m_queue);
 			}
 
+			auto& view() { return m_state.matrices.view; }
+
 		private:
 			const winrt::com_ptr<ID3D12Device4> m_device {};
 			const winrt::com_ptr<ID3D12CommandQueue> m_queue {};
@@ -492,8 +494,18 @@ namespace helium {
 		{
 			d3d12_renderer renderer {window, enable_debugging};
 			winrt::check_bool(PostMessage(window, ready_message, 0, 0));
-			while (!is_exit_required)
+			std::uint64_t frame {};
+			while (!is_exit_required) {
 				renderer.render();
+
+				const auto angle = (frame / 60.0f) * 0.25f;
+				// Does the renderer always need to have the view matrix built in? It will be animated often
+				renderer.view() = DirectX::XMMatrixMultiply(
+					DirectX::XMMatrixRotationRollPitchYaw(angle, 0.0f, angle),
+					DirectX::XMMatrixTranslation(0.0f, 0.0f, 50.0f));
+
+				++frame;
+			}
 		}
 	}
 }
