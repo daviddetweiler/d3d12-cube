@@ -10,7 +10,7 @@
 
 #include <gsl/gsl>
 
-namespace helium {
+namespace cube {
 	namespace {
 		template <char delimiter, typename iterator_type>
 		std::string_view get_next(iterator_type& iterator, const iterator_type& last) noexcept
@@ -40,7 +40,7 @@ namespace helium {
 	}
 }
 
-helium::wavefront helium::load_wavefront(gsl::czstring<> name)
+cube::wavefront cube::load_wavefront(gsl::czstring<> name)
 {
 	std::ifstream file {name, file.ate};
 	file.exceptions(file.badbit);
