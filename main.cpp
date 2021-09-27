@@ -22,7 +22,7 @@
 #include "shader_loading.h"
 #include "wavefront_loader.h"
 
-namespace helium {
+namespace cube {
 	namespace {
 		constexpr auto ready_message = WM_USER;
 
@@ -522,11 +522,11 @@ namespace helium {
 
 int WinMain(HINSTANCE self, HINSTANCE, char*, int)
 {
-	using namespace helium;
+	using namespace cube;
 
 	WNDCLASS window_class {};
 	window_class.hInstance = self;
-	window_class.lpszClassName = L"helium::window";
+	window_class.lpszClassName = L"cube::window";
 	window_class.hCursor = winrt::check_pointer(LoadCursor(nullptr, IDC_ARROW));
 	window_class.lpfnWndProc = handle_message;
 	winrt::check_bool(RegisterClass(&window_class));
@@ -534,7 +534,7 @@ int WinMain(HINSTANCE self, HINSTANCE, char*, int)
 	const auto window = winrt::check_pointer(CreateWindowEx(
 		WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP,
 		window_class.lpszClassName,
-		L"Helium Prototype",
+		L"Cube",
 		WS_OVERLAPPEDWINDOW,
 		CW_USEDEFAULT,
 		CW_USEDEFAULT,

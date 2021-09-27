@@ -6,7 +6,7 @@
 
 #include <gsl/gsl>
 
-namespace helium {
+namespace cube {
 	struct vector3 {
 		float x;
 		float y;

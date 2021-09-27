@@ -14,7 +14,7 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
-namespace helium {
+namespace cube {
 	auto transition(ID3D12Resource& resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) noexcept
 	{
 		Expects(before != after); // Or else what, pray tell, is the purpose of your barrier?

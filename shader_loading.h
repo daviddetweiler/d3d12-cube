@@ -5,7 +5,7 @@
 
 #include <gsl/gsl>
 
-namespace helium {
+namespace cube {
 	std::vector<char> load_compiled_shader(gsl::cwzstring<> name);
 }
 
