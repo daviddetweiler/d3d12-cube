@@ -22,7 +22,7 @@ namespace cube {
 		std::vector<face_descriptor> faces;
 	};
 
-	wavefront load_wavefront(gsl::czstring<> name);
+	wavefront load_wavefront(gsl::czstring name);
 }
 
 #endif

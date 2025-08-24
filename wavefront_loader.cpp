@@ -40,7 +40,7 @@ namespace cube {
 	}
 }
 
-cube::wavefront cube::load_wavefront(gsl::czstring<> name)
+cube::wavefront cube::load_wavefront(gsl::czstring name)
 {
 	std::ifstream file {name, file.ate};
 	file.exceptions(file.badbit);

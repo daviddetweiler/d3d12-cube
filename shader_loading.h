@@ -6,7 +6,7 @@
 #include <gsl/gsl>
 
 namespace cube {
-	std::vector<char> load_compiled_shader(gsl::cwzstring<> name);
+	std::vector<char> load_compiled_shader(gsl::cwzstring name);
 }
 
 #endif
